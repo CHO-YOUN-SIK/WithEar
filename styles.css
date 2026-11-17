@@ -1,0 +1,750 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@700;800&family=Space+Grotesk:wght@700;800&display=swap');
+
+:root {
+  --bg-cream: #FFFDF7;
+  --ink: #141414;
+  --white: #FFFFFF;
+
+  /* Cute & Trendy Pop Neo-Brutalism Palette */
+  --pop-yellow: #FFE156;
+  --pop-pink: #FF7EB6;
+  --pop-mint: #6EE7B7;
+  --pop-blue: #70D6FF;
+  --pop-orange: #FF9F5A;
+  --pop-coral: #FF5D5D;
+  --pop-lime: #B8F254;
+
+  --border-thick: 3px solid #141414;
+  --border-heavy: 4px solid #141414;
+
+  --shadow-sm: 3px 3px 0px #141414;
+  --shadow-md: 5px 5px 0px #141414;
+  --shadow-lg: 7px 7px 0px #141414;
+
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 28px;
+
+  --font-sans: 'Plus Jakarta Sans', 'Pretendard', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', sans-serif;
+  --font-num: 'Space Grotesk', 'Plus Jakarta Sans', monospace;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  min-height: 100%;
+  background-color: var(--bg-cream);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-weight: 800;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  transition: background-color 0.08s ease;
+}
+
+body.beat-flash-downbeat {
+  background-color: #FFF099;
+}
+
+body.beat-flash-normal {
+  background-color: #E2FBE8;
+}
+
+.app-shell {
+  max-width: 680px;
+  margin: 0 auto;
+  min-height: 100vh;
+  padding: 20px 16px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* Neo-Brutalist Pressable Utility */
+.neo-btn {
+  border: var(--border-thick);
+  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-lg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.neo-btn:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.neo-btn:active {
+  transform: translate(3px, 3px);
+  box-shadow: 1px 1px 0px #141414;
+}
+
+/* Top Bar */
+.top-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brand-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: var(--pop-yellow);
+  border: var(--border-thick);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: transform 0.08s ease;
+}
+
+.brand-pill:active {
+  transform: translate(2px, 2px);
+}
+
+.brand-pill h1 {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.sync-tag {
+  padding: 8px 14px;
+  background: var(--white);
+  border: var(--border-thick);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--pop-mint);
+  border: 2px solid var(--ink);
+}
+
+/* Screens */
+.screen {
+  display: none;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.screen.active {
+  display: flex;
+}
+
+/* ==========================================
+   1. HOME SCREEN (큰 버튼 3개만!)
+   ========================================== */
+.home-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 12px;
+}
+
+.home-big-btn {
+  width: 100%;
+  min-height: 118px;
+  padding: 24px 28px;
+  border-radius: var(--radius-xl);
+  border: var(--border-heavy);
+  box-shadow: var(--shadow-lg);
+  font-size: clamp(1.65rem, 5vw, 2.2rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  color: var(--ink);
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+
+.home-big-btn:hover {
+  transform: translate(-3px, -3px);
+  box-shadow: 9px 9px 0px #141414;
+}
+
+.home-big-btn:active {
+  transform: translate(4px, 4px);
+  box-shadow: 2px 2px 0px #141414;
+}
+
+.home-big-btn.btn-yellow { background: var(--pop-yellow); }
+.home-big-btn.btn-mint   { background: var(--pop-mint); }
+.home-big-btn.btn-pink   { background: var(--pop-pink); }
+
+.big-btn-badge {
+  width: 54px;
+  height: 54px;
+  border-radius: 999px;
+  background: var(--white);
+  border: var(--border-thick);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ==========================================
+   2. ROOM SCREEN (상단 멤버 + 중앙 프리셋/BPM/PLAY + 6 프리셋)
+   ========================================== */
+.room-top-box {
+  background: var(--white);
+  border: var(--border-thick);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.room-bar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.room-pin-badge {
+  padding: 8px 16px;
+  background: var(--pop-yellow);
+  border: var(--border-thick);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-num);
+  font-size: 1.2rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.participants-wrap {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.member-sticker {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: var(--border-thick);
+  box-shadow: var(--shadow-sm);
+  font-size: 0.95rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: transform 0.06s ease;
+}
+
+.member-sticker.pulse {
+  transform: scale(1.08) translateY(-2px);
+}
+
+.add-member-chip {
+  padding: 8px 13px;
+  border-radius: 999px;
+  border: 2px dashed var(--ink);
+  background: var(--bg-cream);
+  font-size: 0.85rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+/* Center Stage: Huge Preset, Huge BPM, Beat Blocks, Huge PLAY */
+.room-stage-card {
+  background: var(--white);
+  border: var(--border-heavy);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: 28px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 20px;
+}
+
+.stage-preset-pill {
+  padding: 6px 16px;
+  border-radius: 999px;
+  border: var(--border-thick);
+  background: var(--pop-blue);
+  box-shadow: var(--shadow-sm);
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.stage-preset-name {
+  font-size: clamp(1.6rem, 4.5vw, 2.2rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.stage-bpm-giant {
+  font-family: var(--font-num);
+  font-size: clamp(5rem, 16vw, 7.5rem);
+  font-weight: 800;
+  line-height: 0.9;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-sub-pills {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.stage-meta-tag {
+  padding: 7px 14px;
+  border-radius: 12px;
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.stage-meta-tag.var-tag {
+  background: var(--pop-orange);
+}
+
+/* Cute Chunky Beat Blocks */
+.beat-blocks-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 400px;
+}
+
+.beat-block {
+  flex: 1;
+  height: 62px;
+  border-radius: var(--radius-md);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-num);
+  font-size: 1.5rem;
+  font-weight: 800;
+  transition: transform 0.05s ease, background-color 0.05s ease;
+}
+
+.beat-block.active-downbeat {
+  background: var(--pop-yellow);
+  transform: translate(-2px, -4px) scale(1.06);
+  box-shadow: var(--shadow-md);
+}
+
+.beat-block.active-beat {
+  background: var(--pop-mint);
+  transform: translate(-2px, -3px) scale(1.04);
+  box-shadow: var(--shadow-md);
+}
+
+/* Giant PLAY Button */
+.giant-play-btn {
+  width: 100%;
+  max-width: 340px;
+  height: 86px;
+  border-radius: 999px;
+  border: var(--border-heavy);
+  background: var(--pop-lime);
+  box-shadow: var(--shadow-lg);
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+
+.giant-play-btn:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 9px 9px 0px #141414;
+}
+
+.giant-play-btn:active {
+  transform: translate(4px, 4px);
+  box-shadow: 2px 2px 0px #141414;
+}
+
+.giant-play-btn.is-playing {
+  background: var(--pop-coral);
+  color: var(--white);
+}
+
+/* 6 Presets Chunky Grid */
+.presets-6-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.preset-color-btn {
+  padding: 16px 14px;
+  border-radius: var(--radius-lg);
+  border: var(--border-thick);
+  background: var(--white);
+  box-shadow: var(--shadow-md);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+
+.preset-color-btn:hover {
+  transform: translate(-2px, -2px);
+}
+
+.preset-color-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0px #141414;
+}
+
+.preset-color-btn.selected {
+  border-width: 4px;
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.p-color-0 { background: #FFF3B0; }
+.p-color-1 { background: #FFD6E8; }
+.p-color-2 { background: #C8FCEA; }
+.p-color-3 { background: #CBEFFF; }
+.p-color-4 { background: #FFE2C8; }
+.p-color-5 { background: #E9FFB8; }
+
+.preset-color-btn.selected.p-color-0 { background: var(--pop-yellow); }
+.preset-color-btn.selected.p-color-1 { background: var(--pop-pink); }
+.preset-color-btn.selected.p-color-2 { background: var(--pop-mint); }
+.preset-color-btn.selected.p-color-3 { background: var(--pop-blue); }
+.preset-color-btn.selected.p-color-4 { background: var(--pop-orange); }
+.preset-color-btn.selected.p-color-5 { background: var(--pop-lime); }
+
+.pcb-num {
+  font-family: var(--font-num);
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.pcb-title {
+  font-size: 1.05rem;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pcb-bpm {
+  font-family: var(--font-num);
+  font-size: 1.15rem;
+  font-weight: 800;
+}
+
+/* ==========================================
+   3. PRESET SETTINGS SCREEN (큼직하고 심플하게!)
+   ========================================== */
+.editor-card {
+  background: var(--white);
+  border: var(--border-heavy);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: 22px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.slot-numbers-bar {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+}
+
+.slot-num-btn {
+  height: 54px;
+  border-radius: var(--radius-md);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-num);
+  font-size: 1.2rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.slot-num-btn.active {
+  background: var(--pop-yellow);
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-md);
+}
+
+.neo-input {
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-sans);
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: var(--ink);
+  outline: none;
+}
+
+.neo-input:focus {
+  background: #FFF9DB;
+}
+
+.mode-big-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.mode-switch-btn {
+  padding: 14px;
+  border-radius: var(--radius-md);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  box-shadow: var(--shadow-sm);
+  font-size: 1.1rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.mode-switch-btn.active {
+  background: var(--pop-pink);
+  box-shadow: var(--shadow-md);
+  transform: translate(-1px, -1px);
+}
+
+/* Huge TAP Box */
+.tap-giant-zone {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 14px;
+  align-items: stretch;
+}
+
+.tap-hit-btn {
+  min-height: 140px;
+  border-radius: var(--radius-lg);
+  border: var(--border-heavy);
+  background: var(--pop-yellow);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px;
+  transition: transform 0.06s ease, box-shadow 0.06s ease;
+}
+
+.tap-hit-btn:active, .tap-hit-btn.tapped {
+  transform: translate(4px, 4px);
+  box-shadow: 1px 1px 0px #141414;
+  background: var(--pop-orange);
+}
+
+.tap-result-box {
+  border-radius: var(--radius-lg);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  box-shadow: var(--shadow-sm);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.tap-bpm-big {
+  font-family: var(--font-num);
+  font-size: 3.4rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.stepper-mini-row {
+  display: flex;
+  width: 100%;
+  gap: 6px;
+}
+
+.mini-step-btn {
+  flex: 1;
+  padding: 8px 4px;
+  border-radius: 10px;
+  border: var(--border-thick);
+  background: var(--white);
+  font-family: var(--font-num);
+  font-size: 0.9rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+/* Bars Chips */
+.bars-row-card {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.bar-pill-btn {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: var(--border-thick);
+  background: var(--white);
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-num);
+  font-size: 0.95rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.bar-pill-btn.active {
+  background: var(--pop-mint);
+}
+
+/* Variable BPM Sections */
+.var-section-row {
+  display: grid;
+  grid-template-columns: auto 1.2fr 1fr 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: var(--border-thick);
+  background: var(--bg-cream);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+
+.var-section-row.active-section {
+  background: #FFF3B0;
+  border-width: 3px;
+  box-shadow: var(--shadow-md);
+}
+
+.var-mini-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 2px solid var(--ink);
+  background: var(--white);
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+/* Modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 20, 0.55);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+
+.modal-backdrop.open {
+  display: flex;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 390px;
+  background: var(--white);
+  border: var(--border-heavy);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.toast-msg {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: var(--pop-yellow);
+  border: var(--border-thick);
+  box-shadow: var(--shadow-md);
+  color: var(--ink);
+  padding: 12px 22px;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 800;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.18s ease;
+  z-index: 200;
+}
+
+.toast-msg.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+@media (max-width: 640px) {
+  .presets-6-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .tap-giant-zone {
+    grid-template-columns: 1fr;
+  }
+  .var-section-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "withear",
+  "version": "1.0.0",
+  "description": "WithEar - 실시간 다중 접속 인이어 메트로놈 동기화 웹 시스템",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "metronome",
+    "in-ear",
+    "band",
+    "sync",
+    "web-audio"
+  ],
+  "license": "MIT"
+}

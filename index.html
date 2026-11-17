@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WithEar — 인이어 메트로놈</title>
+  <meta name="description" content="방 번호로 접속해 같은 인이어 메트로놈을 듣는 웹 시스템" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- 심플 상단 헤더 -->
+    <header class="top-header">
+      <div class="brand-pill" id="brand-home-trigger" role="button" tabindex="0">
+        <h1>🎧 WithEar</h1>
+      </div>
+
+      <div class="sync-tag">
+        <span class="status-dot" id="sync-status-dot"></span>
+        <span id="sync-status-text">LIVE</span>
+      </div>
+    </header>
+
+    <!-- ==========================================
+         1. 홈 화면 (군더더기 없이 큼직한 버튼 3개!)
+         ========================================== -->
+    <main id="screen-home" class="screen active">
+      <div class="home-stack">
+        <button type="button" id="btn-open-create-room" class="home-big-btn btn-yellow">
+          <span>방 만들기</span>
+          <span class="big-btn-badge">＋</span>
+        </button>
+
+        <button type="button" id="btn-open-join-room" class="home-big-btn btn-mint">
+          <span>방 접속하기</span>
+          <span class="big-btn-badge">＃</span>
+        </button>
+
+        <button type="button" id="btn-open-presets" class="home-big-btn btn-pink">
+          <span>프리셋 설정</span>
+          <span class="big-btn-badge">♪</span>
+        </button>
+      </div>
+    </main>
+
+    <!-- ==========================================
+         2. 프리셋 설정 화면 (탭해서 고정/가변 BPM + 마디수)
+         ========================================== -->
+    <section id="screen-presets" class="screen">
+      <div class="editor-card">
+        <div class="room-bar-row">
+          <h2 style="font-size: 1.5rem;">프리셋 설정</h2>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" id="btn-preset-test-play" class="neo-btn" style="padding: 10px 16px; background: var(--pop-blue);">
+              <span id="preset-test-play-label">▶ 테스트</span>
+            </button>
+            <button type="button" id="btn-preset-back-home" class="neo-btn" style="padding: 10px 18px; background: var(--pop-lime);">
+              저장 완료 ✓
+            </button>
+          </div>
+        </div>
+
+        <!-- 1 ~ 6번 슬롯 버튼 -->
+        <div id="preset-slot-tabs" class="slot-numbers-bar"></div>
+
+        <!-- 프리셋 이름 & 박자 -->
+        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 10px;">
+          <input type="text" id="input-preset-name" class="neo-input" maxlength="24" placeholder="프리셋 이름" />
+          <select id="select-preset-beats" class="neo-input">
+            <option value="4">4/4 박자</option>
+            <option value="3">3/4 박자</option>
+            <option value="6">6/8 박자</option>
+            <option value="2">2/4 박자</option>
+          </select>
+        </div>
+
+        <!-- 고정 BPM vs 가변 BPM 큰 스위치 -->
+        <div class="mode-big-switch">
+          <button type="button" id="btn-mode-fixed" class="mode-switch-btn active">고정 BPM</button>
+          <button type="button" id="btn-mode-variable" class="mode-switch-btn">가변 BPM (구간별)</button>
+        </div>
+
+        <!-- 초대형 TAP & 평균 BPM 박스 -->
+        <div class="tap-giant-zone">
+          <button type="button" id="btn-tap-tempo-pad" class="tap-hit-btn">
+            <span style="font-size: 2rem;">🥁 TAP!</span>
+            <span id="tap-pad-target-title" style="font-size: 0.95rem;">연속으로 눌러 평균 BPM 계산</span>
+          </button>
+
+          <div class="tap-result-box">
+            <span id="calc-bpm-label" style="font-size: 0.85rem;">평균 BPM</span>
+            <div style="display: flex; align-items: baseline; gap: 6px;">
+              <span class="tap-bpm-big" id="calc-bpm-value">120</span>
+              <span style="font-size: 1rem;">BPM</span>
+            </div>
+            <div class="stepper-mini-row">
+              <button type="button" class="mini-step-btn" id="btn-bpm-minus-5">-5</button>
+              <button type="button" class="mini-step-btn" id="btn-bpm-minus-1">-1</button>
+              <input type="number" id="input-direct-bpm" class="var-mini-input" min="30" max="300" value="120" style="text-align: center; width: 72px;" />
+              <button type="button" class="mini-step-btn" id="btn-bpm-plus-1">+1</button>
+              <button type="button" class="mini-step-btn" id="btn-bpm-plus-5">+5</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 고정 BPM: 마디수 선택 -->
+        <div id="fixed-bars-panel" class="bars-row-card">
+          <span style="font-size: 1.05rem;">마디수</span>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+            <button type="button" class="bar-pill-btn active" data-bars="0">∞ 무제한</button>
+            <button type="button" class="bar-pill-btn" data-bars="4">4마디</button>
+            <button type="button" class="bar-pill-btn" data-bars="8">8마디</button>
+            <button type="button" class="bar-pill-btn" data-bars="16">16마디</button>
+            <button type="button" class="bar-pill-btn" data-bars="32">32마디</button>
+            <input type="number" id="input-fixed-bars" class="var-mini-input" min="0" max="999" value="0" style="width: 72px; text-align: center;" />
+          </div>
+        </div>
+
+        <!-- 가변 BPM: 구간별 평균 BPM & 마디수 -->
+        <div id="variable-sections-panel" style="display: none; flex-direction: column; gap: 12px;">
+          <div class="room-bar-row">
+            <span id="variable-summary-text" style="font-size: 1rem;">구간 리스트 (클릭 후 TAP!)</span>
+            <button type="button" id="btn-add-section" class="neo-btn" style="padding: 8px 14px; background: var(--pop-yellow); font-size: 0.9rem;">
+              + 구간 추가
+            </button>
+          </div>
+          <div id="variable-section-list" style="display: flex; flex-direction: column; gap: 10px;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==========================================
+         3. 방 화면 (위에 접속자 + 가운데 큰 프리셋/BPM/PLAY + 6 프리셋)
+         ========================================== -->
+    <section id="screen-room" class="screen">
+      <!-- 상단: 방 번호 & 누구누구 들어왔는지 -->
+      <div class="room-top-box">
+        <div class="room-bar-row">
+          <button type="button" id="btn-copy-room-code" class="room-pin-badge">
+            방 #<span id="room-code-display">0000</span> 📋
+          </button>
+
+          <div style="display: flex; gap: 8px;">
+            <select id="select-click-sound" class="neo-btn" style="padding: 8px 12px; background: var(--bg-cream); font-size: 0.85rem;">
+              <option value="studio">스튜디오 클릭</option>
+              <option value="woodblock">우드블록</option>
+              <option value="digital">디지털 비프</option>
+              <option value="soft">소프트 펄스</option>
+            </select>
+            <button type="button" id="btn-room-edit-presets" class="neo-btn" style="padding: 8px 12px; background: var(--pop-pink); font-size: 0.85rem;">
+              프리셋
+            </button>
+            <button type="button" id="btn-leave-room" class="neo-btn" style="padding: 8px 12px; background: var(--white); font-size: 0.85rem;">
+              나가기
+            </button>
+          </div>
+        </div>
+
+        <!-- 접속한 사람들 닉네임 스티커 -->
+        <div class="participants-wrap">
+          <div id="participants-list" class="participants-wrap"></div>
+          <button type="button" id="btn-add-sim-member" class="add-member-chip">
+            + 멤버 추가
+          </button>
+        </div>
+      </div>
+
+      <!-- 중앙: 크게 프리셋(이름, BPM) + PLAY 버튼 -->
+      <div class="room-stage-card">
+        <span class="stage-preset-pill" id="room-active-slot-badge">PRESET 1</span>
+        <h2 class="stage-preset-name" id="room-active-preset-name">1번 곡 - 오프닝</h2>
+
+        <div class="stage-bpm-giant" id="room-active-bpm">120</div>
+
+        <div class="stage-sub-pills">
+          <span class="stage-meta-tag">
+            <span id="room-current-bar">1</span> / <span id="room-total-bars">∞</span> 마디
+          </span>
+          <span class="stage-meta-tag" id="room-timesig-text">4/4</span>
+          <span class="stage-meta-tag var-tag" id="room-section-pill" style="display: none;">
+            <span id="room-current-section-label">구간 1</span>
+          </span>
+        </div>
+
+        <!-- 박자 블록 -->
+        <div id="room-beat-leds" class="beat-blocks-row"></div>
+
+        <!-- 대형 PLAY 버튼 -->
+        <button type="button" id="btn-room-play-toggle" class="giant-play-btn">
+          <span id="room-play-btn-icon">▶</span>
+          <span id="room-play-btn-text">PLAY</span>
+        </button>
+      </div>
+
+      <!-- 하단: 6개 프리셋 버튼 -->
+      <div id="room-presets-grid" class="presets-6-grid"></div>
+    </section>
+  </div>
+
+  <!-- 심플 방 입장 모달 (방 번호 + 닉네임) -->
+  <div id="room-modal-backdrop" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="room-bar-row">
+        <h3 id="modal-title-text" style="font-size: 1.4rem;">방 만들기</h3>
+        <button type="button" id="btn-close-modal" class="neo-btn" style="width: 38px; height: 38px; background: var(--bg-cream);">✕</button>
+      </div>
+
+      <form id="form-room-entry" style="display: flex; flex-direction: column; gap: 12px;">
+        <input type="text" id="input-room-code" class="neo-input" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="방 번호 4자리" style="text-align: center; font-size: 1.8rem; letter-spacing: 0.2em;" required />
+        <input type="text" id="input-nickname" class="neo-input" maxlength="14" placeholder="닉네임 입력" style="text-align: center;" required />
+        <button type="submit" id="btn-submit-modal" class="neo-btn" style="height: 60px; background: var(--pop-yellow); font-size: 1.25rem; margin-top: 4px;">
+          들어가기 →
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast-msg" class="toast-msg" role="status" aria-live="polite"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
