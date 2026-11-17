@@ -90,10 +90,10 @@
 
   function getOrCreateClientId() {
     try {
-      let id = localStorage.getItem(STORAGE_KEY_CLIENT_ID);
+      let id = sessionStorage.getItem(STORAGE_KEY_CLIENT_ID);
       if (!id) {
         id = 'usr_' + Math.random().toString(36).slice(2, 10);
-        localStorage.setItem(STORAGE_KEY_CLIENT_ID, id);
+        sessionStorage.setItem(STORAGE_KEY_CLIENT_ID, id);
       }
       return id;
     } catch (_) {
@@ -119,10 +119,31 @@
     isPlaying: false,
     playStartTimeMs: null,
     playbackSeq: 0,
+
+    // Clock synchronization state (best min-RTT NTP sample relative to server/host)
     serverClockOffsetMs: 0,
+    bestClockRttMs: Infinity,
     backendAvailable: false,
+    cloudRelayConnected: false,
     clickSound: 'studio'
   };
+
+  function getSynchronizedNowMs() {
+    return Date.now() + state.serverClockOffsetMs;
+  }
+
+  function recordClockSample(clientSentAt, remoteTime, clientReceivedAt) {
+    const rtt = clientReceivedAt - clientSentAt;
+    if (rtt < 0 || rtt > 5000) return;
+    const estimatedRemoteNow = remoteTime + rtt / 2;
+    const offset = estimatedRemoteNow - clientReceivedAt;
+    if (rtt <= state.bestClockRttMs) {
+      state.bestClockRttMs = rtt;
+      state.serverClockOffsetMs = offset;
+    } else {
+      state.serverClockOffsetMs = state.serverClockOffsetMs * 0.8 + offset * 0.2;
+    }
+  }
 
   function loadPresets() {
     try {
@@ -168,19 +189,18 @@
   }
 
   // ==========================================
-  // BACKEND REST API + SSE + WEBSOCKET CLIENT
+  // TIER 1: BACKEND REST API + SSE + WEBSOCKET
   // ==========================================
   let ws = null;
   let wsConnected = false;
   let sseSource = null;
   let broadcastChannel = null;
+  let pendingJoinCallback = null;
 
   if ('BroadcastChannel' in window) {
-    broadcastChannel = new BroadcastChannel('withear_sync_v1');
+    broadcastChannel = new BroadcastChannel('withear_sync_v2');
     broadcastChannel.onmessage = (ev) => {
-      if (ev.data && ev.data.type === 'room_state' && ev.data.room && ev.data.room.code === state.roomCode) {
-        applyRoomStateSnapshot(ev.data.room);
-      }
+      handlePeerBroadcastMessage(ev.data);
     };
   }
 
@@ -203,25 +223,25 @@
       opts.body = JSON.stringify(body);
     }
     const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `HTTP ${res.status}`);
+      throw new Error(data.error || `HTTP ${res.status}`);
     }
-    return res.json();
+    return data;
   }
 
-  async function syncServerClock() {
-    try {
-      const t0 = Date.now();
-      const data = await apiRequest(`/api/clock?clientSentAt=${t0}`, 'GET');
-      const t3 = Date.now();
-      const rtt = t3 - t0;
-      const estimatedServerTime = data.serverSentAt + rtt / 2;
-      state.serverClockOffsetMs = estimatedServerTime - t3;
-      state.backendAvailable = true;
-      updateSyncTag(true, 'SERVER SYNC');
-    } catch (_) {
-      state.backendAvailable = false;
+  async function syncServerClockBurst() {
+    for (let i = 0; i < 5; i++) {
+      try {
+        const t0 = Date.now();
+        const data = await apiRequest(`/api/clock?clientSentAt=${t0}`, 'GET');
+        const t3 = Date.now();
+        recordClockSample(t0, data.serverSentAt, t3);
+        state.backendAvailable = true;
+        updateSyncTag(true, 'ONLINE SYNC');
+      } catch (_) {
+        break;
+      }
     }
   }
 
@@ -252,8 +272,12 @@
   }
 
   function connectWebSocket() {
+    // Always connect to Global Cloud Relay in parallel so online devices on GitHub Pages work immediately
+    connectCloudMqttRelay();
+
     if (window.location.protocol === 'file:') return;
-    syncServerClock();
+
+    syncServerClockBurst();
 
     try {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -261,18 +285,42 @@
       ws.onopen = () => {
         wsConnected = true;
         state.backendAvailable = true;
-        updateSyncTag(true, 'LIVE SYNC');
-        ws.send(JSON.stringify({ type: 'ping_clock', clientSentAt: Date.now() }));
+        updateSyncTag(true, 'ONLINE SYNC');
+        for (let i = 0; i < 5; i++) {
+          setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'ping_clock', clientSentAt: Date.now() }));
+            }
+          }, i * 100);
+        }
       };
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === 'pong_clock') {
-            const now = Date.now();
-            const rtt = now - msg.clientSentAt;
-            state.serverClockOffsetMs = (msg.serverTime + rtt / 2) - now;
+            recordClockSample(msg.clientSentAt, msg.serverTime, Date.now());
           }
-          if (msg.type === 'room_joined' || msg.type === 'room_state') {
+          if (msg.type === 'join_error') {
+            if (pendingJoinCallback) {
+              const cb = pendingJoinCallback;
+              pendingJoinCallback = null;
+              cb({ ok: false, message: msg.message || '존재하지 않는 방입니다.' });
+            } else {
+              showModalError(msg.message || '존재하지 않는 방입니다.');
+            }
+            return;
+          }
+          if (msg.type === 'room_joined') {
+            if (pendingJoinCallback) {
+              const cb = pendingJoinCallback;
+              pendingJoinCallback = null;
+              cb({ ok: true, room: msg.room });
+            } else {
+              applyRoomStateSnapshot(msg.room);
+            }
+            return;
+          }
+          if (msg.type === 'room_state') {
             applyRoomStateSnapshot(msg.room);
           }
         } catch (_) {}
@@ -287,12 +335,294 @@
   }
 
   // ==========================================
-  // WEB AUDIO METRONOME ENGINE (CLOCK-SYNCED)
+  // TIER 2: ONLINE GLOBAL WEBSOCKET BROKER (MQTT OVER WSS)
+  // Enables full cross-device online room creation, room existence verification,
+  // participant tracking, and NTP host-member clock sync on GitHub Pages!
+  // ==========================================
+  let mqttSocket = null;
+  let mqttKeepAliveTimer = null;
+  let pendingOnlineProbe = null; // { roomCode, timerId, resolve }
+
+  function encodeMqttLength(len) {
+    const out = [];
+    do {
+      let byte = len % 128;
+      len = Math.floor(len / 128);
+      if (len > 0) byte |= 128;
+      out.push(byte);
+    } while (len > 0);
+    return out;
+  }
+
+  function encodeMqttUtf8(str) {
+    const bytes = new TextEncoder().encode(str);
+    return [bytes.length >> 8, bytes.length & 0xff, ...bytes];
+  }
+
+  function buildMqttConnectPacket(clientId) {
+    const variableHeader = [
+      0x00, 0x04, 0x4d, 0x51, 0x54, 0x54,
+      0x04,
+      0x02,
+      0x00, 0x3c
+    ];
+    const payload = encodeMqttUtf8(clientId);
+    const remLen = variableHeader.length + payload.length;
+    return new Uint8Array([0x10, ...encodeMqttLength(remLen), ...variableHeader, ...payload]);
+  }
+
+  function buildMqttSubscribePacket(topic, packetId = 1) {
+    const variableHeader = [packetId >> 8, packetId & 0xff];
+    const payload = [...encodeMqttUtf8(topic), 0x00];
+    const remLen = variableHeader.length + payload.length;
+    return new Uint8Array([0x82, ...encodeMqttLength(remLen), ...variableHeader, ...payload]);
+  }
+
+  function buildMqttPublishPacket(topic, messageObj, retain = false) {
+    const topicBytes = encodeMqttUtf8(topic);
+    const bodyBytes = messageObj === null
+      ? new Uint8Array(0)
+      : new TextEncoder().encode(JSON.stringify(messageObj));
+    const remLen = topicBytes.length + bodyBytes.length;
+    const headerByte = retain ? 0x31 : 0x30;
+    return new Uint8Array([headerByte, ...encodeMqttLength(remLen), ...topicBytes, ...bodyBytes]);
+  }
+
+  function connectCloudMqttRelay() {
+    if (mqttSocket) return;
+    try {
+      const wsRelay = new WebSocket('wss://broker.emqx.io:8084/mqtt', 'mqtt');
+      wsRelay.binaryType = 'arraybuffer';
+
+      wsRelay.onopen = () => {
+        mqttSocket = wsRelay;
+        wsRelay.send(buildMqttConnectPacket('we_' + state.clientId + '_' + Math.random().toString(36).slice(2, 6)));
+      };
+
+      wsRelay.onmessage = (ev) => {
+        const bytes = new Uint8Array(ev.data);
+        if (bytes.length < 2) return;
+        const packetType = bytes[0] >> 4;
+
+        if (packetType === 2) {
+          state.cloudRelayConnected = true;
+          updateSyncTag(true, 'ONLINE SYNC');
+          if (state.roomCode) {
+            subscribeCloudRelayRoom(state.roomCode);
+          }
+          clearInterval(mqttKeepAliveTimer);
+          mqttKeepAliveTimer = setInterval(() => {
+            if (mqttSocket && mqttSocket.readyState === WebSocket.OPEN) {
+              mqttSocket.send(new Uint8Array([0xc0, 0x00]));
+            }
+          }, 25000);
+        } else if (packetType === 3) {
+          // Parse potentially multiple MQTT packets in a single WebSocket message
+          let offset = 0;
+          while (offset < bytes.length) {
+            const pType = bytes[offset] >> 4;
+            let multiplier = 1;
+            let remLen = 0;
+            let idx = offset + 1;
+            let encodedByte;
+            do {
+              if (idx >= bytes.length) return;
+              encodedByte = bytes[idx++];
+              remLen += (encodedByte & 127) * multiplier;
+              multiplier *= 128;
+            } while ((encodedByte & 128) !== 0);
+
+            const packetEnd = idx + remLen;
+            if (pType === 3 && idx + 2 <= packetEnd) {
+              const topicLen = (bytes[idx] << 8) | bytes[idx + 1];
+              const payloadStart = idx + 2 + topicLen;
+              if (payloadStart < packetEnd) {
+                const payloadBytes = bytes.subarray(payloadStart, packetEnd);
+                try {
+                  const text = new TextDecoder().decode(payloadBytes);
+                  if (text) {
+                    handleCloudRelayMessage(JSON.parse(text));
+                  }
+                } catch (_) {}
+              }
+            }
+            offset = packetEnd;
+          }
+        }
+      };
+
+      wsRelay.onclose = () => {
+        state.cloudRelayConnected = false;
+        mqttSocket = null;
+        clearInterval(mqttKeepAliveTimer);
+        setTimeout(connectCloudMqttRelay, 2500);
+      };
+
+      wsRelay.onerror = () => {
+        state.cloudRelayConnected = false;
+      };
+    } catch (_) {}
+  }
+
+  function subscribeCloudRelayRoom(roomCode) {
+    if (!mqttSocket || mqttSocket.readyState !== WebSocket.OPEN) return;
+    mqttSocket.send(buildMqttSubscribePacket(`withear/v2/room/${roomCode}`));
+  }
+
+  function publishCloudRelayRoom(roomCode, payloadObj, retain = false) {
+    if (!mqttSocket || mqttSocket.readyState !== WebSocket.OPEN) return;
+    mqttSocket.send(buildMqttPublishPacket(`withear/v2/room/${roomCode}`, payloadObj, retain));
+  }
+
+  function broadcastToAllPeers(roomCode, payloadObj, retain = false) {
+    if (broadcastChannel) {
+      broadcastChannel.postMessage(payloadObj);
+    }
+    publishCloudRelayRoom(roomCode, payloadObj, retain);
+  }
+
+  function handlePeerBroadcastMessage(msg) {
+    if (!msg) return;
+    handleCloudRelayMessage(msg);
+  }
+
+  function handleCloudRelayMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+
+    // 1. Handle NTP clock ping/pong between Room Host and Members
+    if (msg.type === 'peer_clock_ping' && state.roomCode && msg.roomCode === state.roomCode && state.isHost) {
+      broadcastToAllPeers(state.roomCode, {
+        type: 'peer_clock_pong',
+        roomCode: state.roomCode,
+        targetClientId: msg.clientId,
+        clientSentAt: msg.clientSentAt,
+        hostTime: Date.now()
+      }, false);
+      return;
+    }
+
+    if (msg.type === 'peer_clock_pong' && msg.targetClientId === state.clientId) {
+      recordClockSample(msg.clientSentAt, msg.hostTime, Date.now());
+      return;
+    }
+
+    // 2. If we are waiting to verify whether a room exists (`pendingOnlineProbe`)
+    if (pendingOnlineProbe && msg.room && msg.room.code === pendingOnlineProbe.roomCode) {
+      if (msg.room.closed || !Array.isArray(msg.room.participants) || msg.room.participants.length === 0) {
+        return;
+      }
+      // Check room freshness (within last 6 hours)
+      if (msg.room.updatedAt && (Date.now() - msg.room.updatedAt > 6 * 3600 * 1000)) {
+        return;
+      }
+      const probe = pendingOnlineProbe;
+      pendingOnlineProbe = null;
+      clearTimeout(probe.timerId);
+      probe.resolve({ ok: true, room: msg.room });
+      return;
+    }
+
+    // 3. If we are inside a room and someone requests to join (`peer_join_request`)
+    if (msg.type === 'peer_join_request' && state.roomCode && msg.roomCode === state.roomCode) {
+      const all = getLocalRoomsMap();
+      const currentRoom = all[state.roomCode] || {
+        code: state.roomCode,
+        hostId: state.isHost ? state.clientId : (state.participants[0]?.id || state.clientId),
+        updatedAt: Date.now(),
+        participants: [...state.participants],
+        presets: state.presets,
+        selectedPresetIndex: state.selectedPresetIndex,
+        playback: {
+          isPlaying: state.isPlaying,
+          startServerTime: state.playStartTimeMs,
+          presetIndex: state.selectedPresetIndex,
+          seq: state.playbackSeq
+        }
+      };
+
+      const existingIdx = currentRoom.participants.findIndex((p) => p.id === msg.clientId);
+      if (existingIdx >= 0) {
+        currentRoom.participants[existingIdx].nickname = msg.nickname;
+      } else {
+        currentRoom.participants.push({
+          id: msg.clientId,
+          nickname: msg.nickname,
+          isHost: currentRoom.hostId === msg.clientId
+        });
+      }
+      currentRoom.updatedAt = Date.now();
+      currentRoom.serverTime = getSynchronizedNowMs();
+
+      saveLocalRoomSnapshot(currentRoom);
+      applyRoomStateSnapshot(currentRoom);
+
+      if (state.isHost) {
+        broadcastToAllPeers(state.roomCode, { type: 'room_state', room: currentRoom }, true);
+      }
+      return;
+    }
+
+    // 4. Member leave notification
+    if (msg.type === 'peer_leave' && state.roomCode && msg.roomCode === state.roomCode) {
+      const all = getLocalRoomsMap();
+      const currentRoom = all[state.roomCode];
+      if (!currentRoom) return;
+      currentRoom.participants = (currentRoom.participants || []).filter((p) => p.id !== msg.clientId);
+
+      if (currentRoom.participants.length === 0) {
+        delete all[state.roomCode];
+        try { localStorage.setItem(STORAGE_KEY_ROOMS, JSON.stringify(all)); } catch (_) {}
+        publishCloudRelayRoom(state.roomCode, null, true);
+        return;
+      }
+
+      if (currentRoom.hostId === msg.clientId) {
+        currentRoom.participants[0].isHost = true;
+        currentRoom.hostId = currentRoom.participants[0].id;
+      }
+      currentRoom.updatedAt = Date.now();
+      saveLocalRoomSnapshot(currentRoom);
+      applyRoomStateSnapshot(currentRoom);
+      if (state.isHost) {
+        broadcastToAllPeers(state.roomCode, { type: 'room_state', room: currentRoom }, true);
+      }
+      return;
+    }
+
+    // 5. Room state update
+    if (msg.type === 'room_state' && msg.room && msg.room.code === state.roomCode) {
+      if (msg.room.closed) return;
+      saveLocalRoomSnapshot(msg.room);
+      applyRoomStateSnapshot(msg.room);
+    }
+  }
+
+  function startPeerClockSyncWithHost(roomCode) {
+    if (state.isHost) {
+      state.serverClockOffsetMs = 0;
+      state.bestClockRttMs = 0;
+      return;
+    }
+    for (let i = 0; i < 5; i++) {
+      setTimeout(() => {
+        if (state.roomCode === roomCode) {
+          broadcastToAllPeers(roomCode, {
+            type: 'peer_clock_ping',
+            roomCode,
+            clientId: state.clientId,
+            clientSentAt: Date.now()
+          }, false);
+        }
+      }, i * 140);
+    }
+  }
+
+  // ==========================================
+  // PHASE-LOCKED WEB AUDIO METRONOME ENGINE
   // ==========================================
   let audioCtx = null;
   let schedulerTimerId = null;
-  let nextNoteAudioTime = 0;
-  let sequenceStepIndex = 0;
+  let scheduledStepIndex = 0;
 
   function ensureAudioContext() {
     if (!audioCtx) {
@@ -364,9 +694,11 @@
       if (maxBars > 0 && globalBarZeroBased >= maxBars) {
         return { finished: true };
       }
+      const bpm = clampBpm(preset.bpm);
       return {
         finished: false,
-        bpm: clampBpm(preset.bpm),
+        bpm,
+        beatDurationMs: 60000 / bpm,
         beatInBar,
         globalBar: globalBarZeroBased + 1,
         totalBars: maxBars > 0 ? maxBars : '∞',
@@ -396,9 +728,11 @@
     }
 
     const activeSec = sections[chosenSectionIndex];
+    const bpm = clampBpm(activeSec.bpm);
     return {
       finished: false,
-      bpm: clampBpm(activeSec.bpm),
+      bpm,
+      beatDurationMs: 60000 / bpm,
       beatInBar,
       globalBar: effectiveBarInCycle + 1,
       totalBars: totalCycleBars,
@@ -410,43 +744,105 @@
     };
   }
 
+  function getCumulativeBeatOffsetMs(preset, targetBeatIndex) {
+    if (targetBeatIndex <= 0) return 0;
+    if (preset.mode === 'fixed') {
+      const bpm = clampBpm(preset.bpm);
+      return targetBeatIndex * (60000 / bpm);
+    }
+
+    const beatsPerBar = Number(preset.beatsPerBar) || 4;
+    const sections = Array.isArray(preset.sections) && preset.sections.length > 0
+      ? preset.sections
+      : [{ name: '구간 1', bpm: preset.bpm || 120, bars: 4 }];
+
+    let cycleBeats = 0;
+    let cycleDurationMs = 0;
+    for (const s of sections) {
+      const sBeats = (Math.max(1, Number(s.bars) || 4)) * beatsPerBar;
+      const sBpm = clampBpm(s.bpm);
+      cycleBeats += sBeats;
+      cycleDurationMs += sBeats * (60000 / sBpm);
+    }
+
+    const fullCycles = Math.floor(targetBeatIndex / cycleBeats);
+    let remBeats = targetBeatIndex % cycleBeats;
+    let offsetMs = fullCycles * cycleDurationMs;
+
+    for (const s of sections) {
+      if (remBeats <= 0) break;
+      const sBeats = (Math.max(1, Number(s.bars) || 4)) * beatsPerBar;
+      const sBpm = clampBpm(s.bpm);
+      const take = Math.min(remBeats, sBeats);
+      offsetMs += take * (60000 / sBpm);
+      remBeats -= take;
+    }
+
+    return offsetMs;
+  }
+
+  function findInitialBeatIndex(preset, anchorStartMs, syncNowMs) {
+    if (syncNowMs <= anchorStartMs) return 0;
+    const elapsedMs = syncNowMs - anchorStartMs;
+
+    if (preset.mode === 'fixed') {
+      const beatMs = 60000 / clampBpm(preset.bpm);
+      return Math.ceil((elapsedMs - 15) / beatMs);
+    }
+
+    let k = 0;
+    while (k < 100000 && getCumulativeBeatOffsetMs(preset, k) < elapsedMs - 15) {
+      k++;
+    }
+    return k;
+  }
+
   function startMetronomeEngine(activePreset, scheduledServerStartTime = null) {
     stopMetronomeEngine(false);
     const ctx = ensureAudioContext();
-    sequenceStepIndex = 0;
 
-    if (scheduledServerStartTime) {
-      const estimatedServerNow = Date.now() + state.serverClockOffsetMs;
-      const deltaSec = (scheduledServerStartTime - estimatedServerNow) / 1000;
-      nextNoteAudioTime = ctx.currentTime + Math.max(0.02, Math.min(0.5, deltaSec));
-    } else {
-      nextNoteAudioTime = ctx.currentTime + 0.04;
-    }
+    const syncNow = getSynchronizedNowMs();
+    const anchorStartMs = scheduledServerStartTime || (syncNow + 40);
+
+    scheduledStepIndex = findInitialBeatIndex(activePreset, anchorStartMs, syncNow);
+
+    const lookaheadHorizonMs = 110;
 
     schedulerTimerId = window.setInterval(() => {
       if (!state.isPlaying && !state.isPreviewPlaying) return;
 
-      while (nextNoteAudioTime < ctx.currentTime + 0.1) {
-        const meta = resolveBeatMetadata(activePreset, sequenceStepIndex);
+      const currentSyncMs = getSynchronizedNowMs();
+      const currentAudioTime = ctx.currentTime;
+
+      while (true) {
+        const beatOffsetMs = getCumulativeBeatOffsetMs(activePreset, scheduledStepIndex);
+        const beatTargetServerMs = anchorStartMs + beatOffsetMs;
+        const msUntilBeat = beatTargetServerMs - currentSyncMs;
+
+        if (msUntilBeat > lookaheadHorizonMs) {
+          break;
+        }
+
+        const meta = resolveBeatMetadata(activePreset, scheduledStepIndex);
         if (meta.finished) {
           if (state.isPreviewPlaying) stopPreviewPlay();
           else if (state.isPlaying) triggerRoomPlayState(false);
           return;
         }
 
-        playClickSound(nextNoteAudioTime, meta.beatInBar === 0, state.clickSound);
+        const noteAudioTime = currentAudioTime + Math.max(0, msUntilBeat / 1000);
+        playClickSound(noteAudioTime, meta.beatInBar === 0, state.clickSound);
 
-        const delayMs = Math.max(0, (nextNoteAudioTime - ctx.currentTime) * 1000);
+        const visualDelayMs = Math.max(0, msUntilBeat);
         const capturedMeta = { ...meta };
         window.setTimeout(() => {
           if (!state.isPlaying && !state.isPreviewPlaying) return;
           updateVisualBeatUI(capturedMeta);
-        }, delayMs);
+        }, visualDelayMs);
 
-        nextNoteAudioTime += 60.0 / meta.bpm;
-        sequenceStepIndex++;
+        scheduledStepIndex++;
       }
-    }, 25);
+    }, 20);
   }
 
   function stopMetronomeEngine(resetUI = true) {
@@ -472,16 +868,18 @@
       all[roomSnapshot.code] = roomSnapshot;
       localStorage.setItem(STORAGE_KEY_ROOMS, JSON.stringify(all));
     } catch (_) {}
-    if (broadcastChannel) {
-      broadcastChannel.postMessage({ type: 'room_state', room: roomSnapshot });
-    }
   }
 
   function applyRoomStateSnapshot(room) {
     if (!room) return;
+    if (room.serverTime && !Number.isFinite(state.bestClockRttMs)) {
+      state.serverClockOffsetMs = room.serverTime - Date.now();
+    }
+
     const wasPlaying = state.isPlaying;
     const prevPresetIdx = state.selectedPresetIndex;
     const prevSeq = state.playbackSeq;
+    const prevStartTime = state.playStartTimeMs;
 
     state.roomCode = room.code;
     state.isHost = room.hostId === state.clientId;
@@ -502,7 +900,12 @@
     renderRoomScreen();
 
     if (state.isPlaying) {
-      if (!wasPlaying || prevPresetIdx !== state.selectedPresetIndex || prevSeq !== state.playbackSeq) {
+      if (
+        !wasPlaying ||
+        prevPresetIdx !== state.selectedPresetIndex ||
+        prevSeq !== state.playbackSeq ||
+        prevStartTime !== state.playStartTimeMs
+      ) {
         const preset = state.presets[state.selectedPresetIndex] || state.presets[0];
         startMetronomeEngine(preset, state.playStartTimeMs);
       }
@@ -528,106 +931,237 @@
     toast.textContent = message;
     toast.classList.add('show');
     clearTimeout(showToast._timer);
-    showToast._timer = setTimeout(() => toast.classList.remove('show'), 2200);
+    showToast._timer = setTimeout(() => toast.classList.remove('show'), 2400);
+  }
+
+  function showModalError(msg) {
+    const errEl = document.getElementById('modal-error-banner');
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.style.display = 'block';
+    }
+    showToast(msg);
+  }
+
+  function hideModalError() {
+    const errEl = document.getElementById('modal-error-banner');
+    if (errEl) errEl.style.display = 'none';
   }
 
   // ==========================================
-  // MODAL (방 만들기 / 방 접속하기)
+  // MODAL (방 만들기 / 방 접속하기 — 방 존재 여부 검증 포함)
   // ==========================================
   function openRoomModal(mode) {
     state.modalMode = mode;
+    hideModalError();
+
     const backdrop = document.getElementById('room-modal-backdrop');
     const titleEl = document.getElementById('modal-title-text');
     const codeInput = document.getElementById('input-room-code');
     const nickInput = document.getElementById('input-nickname');
+    const submitBtn = document.getElementById('btn-submit-modal');
 
     if (mode === 'create') {
       titleEl.textContent = '방 만들기';
       codeInput.value = String(Math.floor(1000 + Math.random() * 9000));
+      submitBtn.textContent = '방 만들기 →';
     } else {
       titleEl.textContent = '방 접속하기';
-      codeInput.value = state.roomCode || '';
+      codeInput.value = '';
+      submitBtn.textContent = '방 접속하기 →';
     }
+    submitBtn.disabled = false;
 
     nickInput.value = state.nickname || (mode === 'create' ? '그룹장' : '');
     backdrop.classList.add('open');
     setTimeout(() => {
-      if (mode === 'join' && !codeInput.value) codeInput.focus();
+      if (mode === 'join') codeInput.focus();
       else nickInput.focus();
     }, 50);
   }
 
   function closeRoomModal() {
+    hideModalError();
+    if (pendingOnlineProbe) {
+      clearTimeout(pendingOnlineProbe.timerId);
+      pendingOnlineProbe = null;
+    }
     document.getElementById('room-modal-backdrop').classList.remove('open');
+  }
+
+  function verifyRoomOnCloudOrLocal(roomCode, timeoutMs = 1300) {
+    return new Promise((resolve) => {
+      // 1. Check same-device active room first
+      const allLocal = getLocalRoomsMap();
+      const localRoom = allLocal[roomCode];
+      if (localRoom && !localRoom.closed && Array.isArray(localRoom.participants) && localRoom.participants.length > 0) {
+        resolve({ ok: true, room: localRoom });
+        return;
+      }
+
+      // 2. Check online MQTT broker retained room state / host response
+      if (!mqttSocket || mqttSocket.readyState !== WebSocket.OPEN) {
+        resolve({ ok: false, message: '존재하지 않는 방입니다! 방 번호를 확인해주세요.' });
+        return;
+      }
+
+      if (pendingOnlineProbe) {
+        clearTimeout(pendingOnlineProbe.timerId);
+      }
+
+      const timerId = setTimeout(() => {
+        pendingOnlineProbe = null;
+        resolve({ ok: false, message: '존재하지 않는 방입니다! 방 번호를 확인해주세요.' });
+      }, timeoutMs);
+
+      pendingOnlineProbe = { roomCode, timerId, resolve };
+      subscribeCloudRelayRoom(roomCode);
+    });
   }
 
   async function handleRoomEntrySubmit(e) {
     e.preventDefault();
     ensureAudioContext();
+    hideModalError();
 
     const codeInput = document.getElementById('input-room-code');
     const nickInput = document.getElementById('input-nickname');
+    const submitBtn = document.getElementById('btn-submit-modal');
     const rawCode = String(codeInput.value || '').replace(/\D/g, '').slice(0, 4);
     const nickname = String(nickInput.value || '').trim() || '멤버';
 
     if (rawCode.length !== 4) {
-      showToast('4자리 숫자를 입력해주세요!');
+      showModalError('4자리 숫자 방 번호를 입력해주세요!');
       codeInput.focus();
       return;
     }
 
     state.nickname = nickname;
     try { localStorage.setItem(STORAGE_KEY_NICKNAME, nickname); } catch (_) {}
-    closeRoomModal();
 
-    if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: state.modalMode === 'create' ? 'create_room' : 'join_room',
-        clientId: state.clientId,
-        roomCode: rawCode,
-        nickname,
-        presets: state.presets
-      }));
-      subscribeRoomSse(rawCode);
-    } else if (state.backendAvailable) {
-      try {
-        const endpoint = state.modalMode === 'create'
-          ? '/api/rooms'
-          : `/api/rooms/${encodeURIComponent(rawCode)}/join`;
-        const data = await apiRequest(endpoint, 'POST', {
-          roomCode: rawCode,
-          clientId: state.clientId,
-          nickname,
-          presets: state.presets
-        });
-        if (data.room) {
-          applyRoomStateSnapshot(data.room);
-          subscribeRoomSse(data.room.code);
-        }
-      } catch (err) {
-        showToast(err.message);
-      }
-    } else {
-      const allRooms = getLocalRoomsMap();
-      let room = allRooms[rawCode];
-      if (state.modalMode === 'create' || !room) {
-        room = {
-          code: rawCode,
-          hostId: state.clientId,
-          participants: [{ id: state.clientId, nickname, isHost: true }],
-          presets: state.presets,
-          selectedPresetIndex: 0,
-          playback: { isPlaying: false, startServerTime: null, presetIndex: 0, seq: 1 }
-        };
-      } else {
-        if (!room.participants.some((p) => p.id === state.clientId)) {
-          room.participants.push({ id: state.clientId, nickname, isHost: false });
+    // CASE 1: CREATE ROOM (방 만들기)
+    if (state.modalMode === 'create') {
+      submitBtn.disabled = true;
+      submitBtn.textContent = '방 생성 중...';
+
+      if (state.backendAvailable) {
+        try {
+          const data = await apiRequest('/api/rooms', 'POST', {
+            roomCode: rawCode,
+            clientId: state.clientId,
+            nickname,
+            presets: state.presets
+          });
+          if (data.room) {
+            saveLocalRoomSnapshot(data.room);
+            applyRoomStateSnapshot(data.room);
+            subscribeRoomSse(data.room.code);
+            subscribeCloudRelayRoom(data.room.code);
+            publishCloudRelayRoom(data.room.code, { type: 'room_state', room: data.room }, true);
+            closeRoomModal();
+            switchScreen('room');
+            return;
+          }
+        } catch (err) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = '방 만들기 →';
+          showModalError(err.message || '방 생성에 실패했습니다.');
+          return;
         }
       }
-      saveLocalRoomSnapshot(room);
-      applyRoomStateSnapshot(room);
+
+      // Online Cloud Relay + Local Room Creation
+      const newRoom = {
+        code: rawCode,
+        hostId: state.clientId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        participants: [{ id: state.clientId, nickname, isHost: true }],
+        presets: state.presets,
+        selectedPresetIndex: 0,
+        playback: { isPlaying: false, startServerTime: null, presetIndex: 0, seq: 1 },
+        serverTime: Date.now()
+      };
+
+      saveLocalRoomSnapshot(newRoom);
+      applyRoomStateSnapshot(newRoom);
+      subscribeCloudRelayRoom(rawCode);
+      broadcastToAllPeers(rawCode, { type: 'room_state', room: newRoom }, true);
+      closeRoomModal();
+      switchScreen('room');
+      return;
     }
 
+    // CASE 2: JOIN ROOM (방 접속하기 — 방이 없으면 "존재하지 않는 방입니다" 에러 표시!)
+    submitBtn.disabled = true;
+    submitBtn.textContent = '방 확인 중...';
+
+    if (state.backendAvailable) {
+      try {
+        const data = await apiRequest(`/api/rooms/${encodeURIComponent(rawCode)}/join`, 'POST', {
+          clientId: state.clientId,
+          nickname
+        });
+        if (data.room) {
+          saveLocalRoomSnapshot(data.room);
+          applyRoomStateSnapshot(data.room);
+          subscribeRoomSse(data.room.code);
+          subscribeCloudRelayRoom(data.room.code);
+          if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'join_room',
+              clientId: state.clientId,
+              roomCode: rawCode,
+              nickname
+            }));
+          }
+          closeRoomModal();
+          switchScreen('room');
+          return;
+        }
+      } catch (err) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '방 접속하기 →';
+        showModalError(err.message || '존재하지 않는 방입니다! 방 번호를 확인해주세요.');
+        return;
+      }
+    }
+
+    // Online Cloud Relay Verification (GitHub Pages / Cross-Device)
+    const verifyResult = await verifyRoomOnCloudOrLocal(rawCode, 1300);
+    submitBtn.disabled = false;
+    submitBtn.textContent = '방 접속하기 →';
+
+    if (!verifyResult.ok || !verifyResult.room) {
+      showModalError(verifyResult.message || '존재하지 않는 방입니다! 방 번호를 확인해주세요.');
+      return;
+    }
+
+    const foundRoom = verifyResult.room;
+    if (!foundRoom.participants.some((p) => p.id === state.clientId)) {
+      foundRoom.participants.push({
+        id: state.clientId,
+        nickname,
+        isHost: false
+      });
+    }
+    foundRoom.updatedAt = Date.now();
+
+    saveLocalRoomSnapshot(foundRoom);
+    applyRoomStateSnapshot(foundRoom);
+    subscribeCloudRelayRoom(rawCode);
+
+    // Announce join to host and other peers & sync clock with host
+    broadcastToAllPeers(rawCode, {
+      type: 'peer_join_request',
+      roomCode: rawCode,
+      clientId: state.clientId,
+      nickname
+    }, false);
+    broadcastToAllPeers(rawCode, { type: 'room_state', room: foundRoom }, true);
+    startPeerClockSyncWithHost(rawCode);
+
+    closeRoomModal();
     switchScreen('room');
   }
 
@@ -967,12 +1501,14 @@
       if (room) {
         room.selectedPresetIndex = index;
         room.playback.presetIndex = index;
+        room.updatedAt = Date.now();
         if (room.playback.isPlaying) {
-          room.playback.startServerTime = Date.now();
+          room.playback.startServerTime = getSynchronizedNowMs() + 250;
           room.playback.seq = (room.playback.seq || 0) + 1;
         }
         saveLocalRoomSnapshot(room);
         applyRoomStateSnapshot(room);
+        broadcastToAllPeers(state.roomCode, { type: 'room_state', room }, true);
       } else renderRoomScreen();
     } else renderRoomScreen();
   }
@@ -996,12 +1532,14 @@
       if (room) {
         room.playback = {
           isPlaying: targetPlay,
-          startServerTime: targetPlay ? Date.now() : null,
+          startServerTime: targetPlay ? (getSynchronizedNowMs() + 250) : null,
           presetIndex: state.selectedPresetIndex,
           seq: (room.playback?.seq || 0) + 1
         };
+        room.updatedAt = Date.now();
         saveLocalRoomSnapshot(room);
         applyRoomStateSnapshot(room);
+        broadcastToAllPeers(state.roomCode, { type: 'room_state', room }, true);
       } else {
         state.isPlaying = targetPlay;
         if (targetPlay) startMetronomeEngine(state.presets[state.selectedPresetIndex]);
@@ -1011,31 +1549,60 @@
     }
   }
 
-  async function addSimulatedBandMember() {
-    const sampleNames = ['드럼 지훈', '베이스 현우', '기타 준영', '건반 수빈', '보컬 하은'];
-    const existingNames = new Set(state.participants.map((p) => p.nickname));
-    const available = sampleNames.filter((n) => !existingNames.has(n));
-    const chosen = available.length > 0 ? available[0] : `멤버 ${state.participants.length + 1}`;
+  function leaveCurrentRoom() {
+    if (!state.roomCode) return;
+    const leavingCode = state.roomCode;
 
-    if (wsConnected && ws && ws.readyState === WebSocket.OPEN && state.roomCode) {
-      ws.send(JSON.stringify({ type: 'add_simulated_member', nickname: chosen }));
-    } else if (state.backendAvailable && state.roomCode) {
-      try {
-        const res = await apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/simulate-member`, 'POST', {
-          nickname: chosen
-        });
-        if (res.room) applyRoomStateSnapshot(res.room);
-      } catch (_) {}
-    } else if (state.roomCode) {
-      const all = getLocalRoomsMap();
-      const room = all[state.roomCode];
-      if (room) {
-        room.participants.push({ id: 'sim_' + Math.random().toString(36).slice(2, 7), nickname: chosen, isHost: false });
+    if (state.isPlaying) {
+      stopMetronomeEngine(true);
+      state.isPlaying = false;
+    }
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
+    }
+
+    if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'leave_room' }));
+    } else if (state.backendAvailable) {
+      apiRequest(`/api/rooms/${encodeURIComponent(leavingCode)}/leave`, 'POST', {
+        clientId: state.clientId
+      }).catch(() => {});
+    }
+
+    // Update local and cloud relay state
+    const all = getLocalRoomsMap();
+    const room = all[leavingCode];
+    if (room) {
+      room.participants = (room.participants || []).filter((p) => p.id !== state.clientId);
+      if (room.participants.length === 0) {
+        delete all[leavingCode];
+        try { localStorage.setItem(STORAGE_KEY_ROOMS, JSON.stringify(all)); } catch (_) {}
+        publishCloudRelayRoom(leavingCode, null, true);
+      } else {
+        if (room.hostId === state.clientId) {
+          room.participants[0].isHost = true;
+          room.hostId = room.participants[0].id;
+        }
+        room.updatedAt = Date.now();
         saveLocalRoomSnapshot(room);
-        applyRoomStateSnapshot(room);
+        broadcastToAllPeers(leavingCode, { type: 'room_state', room }, true);
       }
     }
+
+    broadcastToAllPeers(leavingCode, {
+      type: 'peer_leave',
+      roomCode: leavingCode,
+      clientId: state.clientId
+    }, false);
+
+    state.roomCode = null;
+    state.participants = [];
   }
+
+  window.addEventListener('pagehide', () => {
+    leaveCurrentRoom();
+  });
 
   function escapeHtml(str) {
     return String(str || '')
@@ -1047,7 +1614,7 @@
 
   function initEventListeners() {
     document.getElementById('brand-home-trigger').addEventListener('click', () => {
-      if (state.isPlaying) triggerRoomPlayState(false);
+      leaveCurrentRoom();
       switchScreen('home');
     });
 
@@ -1056,6 +1623,7 @@
     document.getElementById('btn-open-presets').addEventListener('click', () => switchScreen('presets'));
 
     document.getElementById('btn-close-modal').addEventListener('click', closeRoomModal);
+    document.getElementById('input-room-code').addEventListener('input', hideModalError);
     document.getElementById('form-room-entry').addEventListener('submit', handleRoomEntrySubmit);
 
     document.getElementById('btn-preset-back-home').addEventListener('click', async () => {
@@ -1069,6 +1637,15 @@
             presets: state.presets
           });
         } catch (_) {}
+      } else if (state.roomCode) {
+        const all = getLocalRoomsMap();
+        const room = all[state.roomCode];
+        if (room) {
+          room.presets = state.presets;
+          room.updatedAt = Date.now();
+          saveLocalRoomSnapshot(room);
+          broadcastToAllPeers(state.roomCode, { type: 'room_state', room }, true);
+        }
       }
       showToast('저장 완료!');
       switchScreen(state.roomCode ? 'room' : 'home');
@@ -1167,25 +1744,11 @@
       switchScreen('presets');
     });
 
-    document.getElementById('btn-leave-room').addEventListener('click', async () => {
-      if (state.isPlaying) triggerRoomPlayState(false);
-      if (sseSource) {
-        sseSource.close();
-        sseSource = null;
-      }
-      if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'leave_room' }));
-      } else if (state.backendAvailable && state.roomCode) {
-        apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/leave`, 'POST', {
-          clientId: state.clientId
-        }).catch(() => {});
-      }
-      state.roomCode = null;
-      state.participants = [];
+    document.getElementById('btn-leave-room').addEventListener('click', () => {
+      leaveCurrentRoom();
       switchScreen('home');
     });
 
-    document.getElementById('btn-add-sim-member').addEventListener('click', addSimulatedBandMember);
     document.getElementById('btn-room-play-toggle').addEventListener('click', () => triggerRoomPlayState(!state.isPlaying));
   }
 

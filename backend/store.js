@@ -148,11 +148,13 @@ class BackendStore {
                     participants.set(p.id, p);
                   }
                 }
-                this.rooms.set(r.code, {
-                  ...r,
-                  participants,
-                  presets: sanitizePresets(r.presets)
-                });
+                if (participants.size > 0) {
+                  this.rooms.set(r.code, {
+                    ...r,
+                    participants,
+                    presets: sanitizePresets(r.presets)
+                  });
+                }
               }
             }
           }
@@ -246,24 +248,23 @@ class BackendStore {
     return room;
   }
 
-  joinRoom({ roomCode, clientId, nickname, presets }) {
+  joinRoom({ roomCode, clientId, nickname }) {
     const cleanCode = String(roomCode || '').replace(/\D/g, '').slice(0, 4);
     if (!/^\d{4}$/.test(cleanCode)) {
-      throw new Error('4자리 숫자 방 번호가 필요합니다.');
+      const err = new Error('4자리 숫자 방 번호를 입력해주세요.');
+      err.statusCode = 400;
+      throw err;
     }
 
-    let room = this.rooms.get(cleanCode);
+    const room = this.rooms.get(cleanCode);
+    if (!room || room.participants.size === 0) {
+      const err = new Error('존재하지 않는 방입니다. 방 번호를 확인해주세요.');
+      err.statusCode = 404;
+      throw err;
+    }
+
     const memberId = clientId || 'usr_' + crypto.randomBytes(5).toString('hex');
     const cleanNick = String(nickname || '멤버').trim().slice(0, 20) || '멤버';
-
-    if (!room) {
-      return this.createRoom({
-        roomCode: cleanCode,
-        clientId: memberId,
-        nickname: cleanNick,
-        presets
-      });
-    }
 
     const existing = room.participants.get(memberId);
     room.participants.set(memberId, {
@@ -325,7 +326,7 @@ class BackendStore {
     if (room.playback.isPlaying) {
       room.playback = {
         isPlaying: true,
-        startServerTime: Date.now() + 120,
+        startServerTime: Date.now() + 250,
         presetIndex: idx,
         seq: (room.playback.seq || 0) + 1
       };
@@ -345,7 +346,7 @@ class BackendStore {
     if (nextState) {
       room.playback = {
         isPlaying: true,
-        startServerTime: Date.now() + 120, // 120ms lookahead for synchronized multi-device start
+        startServerTime: Date.now() + 250,
         presetIndex: room.selectedPresetIndex,
         seq: (room.playback.seq || 0) + 1
       };
@@ -358,24 +359,6 @@ class BackendStore {
       };
     }
 
-    room.updatedAt = Date.now();
-    this._scheduleSave();
-    return room;
-  }
-
-  addSimulatedMember(roomCode, nickname) {
-    const room = this.rooms.get(roomCode);
-    if (!room) return null;
-    const simId = 'sim_' + crypto.randomBytes(4).toString('hex');
-    const cleanNick = String(nickname || `멤버 ${room.participants.size + 1}`).trim().slice(0, 20);
-    room.participants.set(simId, {
-      id: simId,
-      nickname: cleanNick,
-      isHost: false,
-      isSimulated: true,
-      joinedAt: Date.now(),
-      lastSeenAt: Date.now()
-    });
     room.updatedAt = Date.now();
     this._scheduleSave();
     return room;
@@ -423,7 +406,6 @@ class BackendStore {
   }
 }
 
-// Utility to compute fixed or section-based average BPM from tap timestamps
 function calculateTapBpmStats(tapTimestamps = [], bars = 4, beatsPerBar = 4) {
   const validTaps = Array.isArray(tapTimestamps)
     ? tapTimestamps.map(Number).filter((n) => Number.isFinite(n))

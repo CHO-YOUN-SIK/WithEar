@@ -82,7 +82,7 @@ function sendWs(socket, data) {
 }
 
 function attachWebSocketServer({ server, store, onRoomUpdated }) {
-  const clients = new Map(); // socket -> { id, roomCode, nickname }
+  const clients = new Map();
 
   function broadcastRoom(roomCode, messageObj) {
     for (const [sock, info] of clients.entries()) {
@@ -143,18 +143,17 @@ function attachWebSocketServer({ server, store, onRoomUpdated }) {
       }
 
       case 'join_room': {
-        if (info.roomCode && info.roomCode !== msg.roomCode) {
-          const prev = store.leaveRoom(info.roomCode, info.id);
-          if (prev && typeof onRoomUpdated === 'function') onRoomUpdated(prev);
-        }
         if (msg.clientId) info.id = String(msg.clientId);
         try {
           const room = store.joinRoom({
             roomCode: msg.roomCode,
             clientId: info.id,
-            nickname: msg.nickname,
-            presets: msg.presets
+            nickname: msg.nickname
           });
+          if (info.roomCode && info.roomCode !== room.code) {
+            const prev = store.leaveRoom(info.roomCode, info.id);
+            if (prev && typeof onRoomUpdated === 'function') onRoomUpdated(prev);
+          }
           info.roomCode = room.code;
           info.nickname = msg.nickname;
 
@@ -165,7 +164,10 @@ function attachWebSocketServer({ server, store, onRoomUpdated }) {
           });
           if (typeof onRoomUpdated === 'function') onRoomUpdated(room);
         } catch (err) {
-          sendWs(socket, { type: 'error', message: err.message });
+          sendWs(socket, {
+            type: 'join_error',
+            message: err.message || '존재하지 않는 방입니다.'
+          });
         }
         break;
       }
@@ -196,13 +198,6 @@ function attachWebSocketServer({ server, store, onRoomUpdated }) {
       case 'toggle_play': {
         if (!info.roomCode) return;
         const room = store.toggleRoomPlayback(info.roomCode, msg.isPlaying);
-        if (room && typeof onRoomUpdated === 'function') onRoomUpdated(room);
-        break;
-      }
-
-      case 'add_simulated_member': {
-        if (!info.roomCode) return;
-        const room = store.addSimulatedMember(info.roomCode, msg.nickname);
         if (room && typeof onRoomUpdated === 'function') onRoomUpdated(room);
         break;
       }

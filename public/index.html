@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WithEar — 인이어 메트로놈</title>
-  <meta name="description" content="방 번호로 접속해 같은 인이어 메트로놈을 듣는 웹 시스템" />
+  <meta name="description" content="방 번호로 접속해 같은 인이어 메트로놈을 듣는 실시간 온라인 웹 시스템" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -17,7 +17,7 @@
 
       <div class="sync-tag">
         <span class="status-dot" id="sync-status-dot"></span>
-        <span id="sync-status-text">LIVE</span>
+        <span id="sync-status-text">ONLINE</span>
       </div>
     </header>
 
@@ -130,10 +130,10 @@
     </section>
 
     <!-- ==========================================
-         3. 방 화면 (위에 접속자 + 가운데 큰 프리셋/BPM/PLAY + 6 프리셋)
+         3. 방 화면 (위에 실제 접속자 + 가운데 큰 프리셋/BPM/PLAY + 6 프리셋)
          ========================================== -->
     <section id="screen-room" class="screen">
-      <!-- 상단: 방 번호 & 누구누구 들어왔는지 -->
+      <!-- 상단: 방 번호 & 실제 들어온 사람들 -->
       <div class="room-top-box">
         <div class="room-bar-row">
           <button type="button" id="btn-copy-room-code" class="room-pin-badge">
@@ -156,13 +156,8 @@
           </div>
         </div>
 
-        <!-- 접속한 사람들 닉네임 스티커 -->
-        <div class="participants-wrap">
-          <div id="participants-list" class="participants-wrap"></div>
-          <button type="button" id="btn-add-sim-member" class="add-member-chip">
-            + 멤버 추가
-          </button>
-        </div>
+        <!-- 실제 접속한 사람들 닉네임 스티커 -->
+        <div id="participants-list" class="participants-wrap"></div>
       </div>
 
       <!-- 중앙: 크게 프리셋(이름, BPM) + PLAY 버튼 -->
@@ -197,7 +192,7 @@
     </section>
   </div>
 
-  <!-- 심플 방 입장 모달 (방 번호 + 닉네임) -->
+  <!-- 방 입장 모달 (방 번호 + 닉네임 + 방 없음 에러 표시) -->
   <div id="room-modal-backdrop" class="modal-backdrop" role="dialog" aria-modal="true">
     <div class="modal-card">
       <div class="room-bar-row">
@@ -208,6 +203,12 @@
       <form id="form-room-entry" style="display: flex; flex-direction: column; gap: 12px;">
         <input type="text" id="input-room-code" class="neo-input" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="방 번호 4자리" style="text-align: center; font-size: 1.8rem; letter-spacing: 0.2em;" required />
         <input type="text" id="input-nickname" class="neo-input" maxlength="14" placeholder="닉네임 입력" style="text-align: center;" required />
+
+        <!-- 방이 없을 때 표시되는 에러 배너 -->
+        <div id="modal-error-banner" style="display: none; padding: 12px 14px; border-radius: 14px; border: 3px solid #141414; background: #FF5D5D; color: #FFFFFF; font-size: 0.95rem; text-align: center; box-shadow: 3px 3px 0px #141414;">
+          존재하지 않는 방입니다!
+        </div>
+
         <button type="submit" id="btn-submit-modal" class="neo-btn" style="height: 60px; background: var(--pop-yellow); font-size: 1.25rem; margin-top: 4px;">
           들어가기 →
         </button>

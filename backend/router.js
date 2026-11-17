@@ -34,7 +34,6 @@ function readJsonBody(req) {
 }
 
 function createApiRouter({ store, broadcastRoom }) {
-  // SSE subscribers: roomCode -> Set<ServerResponse>
   const sseSubscribers = new Map();
 
   function broadcastSse(roomCode, payload) {
@@ -67,7 +66,6 @@ function createApiRouter({ store, broadcastRoom }) {
       return true;
     }
 
-    // 1. GET /api/health
     if (pathname === '/api/health' && req.method === 'GET') {
       sendJson(res, 200, {
         status: 'ok',
@@ -77,7 +75,6 @@ function createApiRouter({ store, broadcastRoom }) {
       return true;
     }
 
-    // 2. GET /api/clock (NTP-style clock offset sync)
     if (pathname === '/api/clock' && req.method === 'GET') {
       const serverReceivedAt = Date.now();
       const clientSentAt = Number(searchParams.get('clientSentAt')) || serverReceivedAt;
@@ -89,7 +86,6 @@ function createApiRouter({ store, broadcastRoom }) {
       return true;
     }
 
-    // 3. POST /api/presets/calculate-bpm (Tap tempo average BPM calculator API)
     if (pathname === '/api/presets/calculate-bpm' && req.method === 'POST') {
       try {
         const body = await readJsonBody(req);
@@ -126,7 +122,6 @@ function createApiRouter({ store, broadcastRoom }) {
       return true;
     }
 
-    // 4. GET / PUT /api/presets/:profileId
     const presetProfileMatch = pathname.match(/^\/api\/presets\/([a-zA-Z0-9_-]+)$/);
     if (presetProfileMatch) {
       const profileId = presetProfileMatch[1];
@@ -149,7 +144,6 @@ function createApiRouter({ store, broadcastRoom }) {
       }
     }
 
-    // 5. GET /api/rooms & POST /api/rooms
     if (pathname === '/api/rooms') {
       if (req.method === 'GET') {
         const list = [];
@@ -186,25 +180,28 @@ function createApiRouter({ store, broadcastRoom }) {
       }
     }
 
-    // 6. Room-specific routes: /api/rooms/:code[...]
     const roomMatch = pathname.match(/^\/api\/rooms\/(\d{4})(?:\/([a-z-]+))?$/);
     if (roomMatch) {
       const code = roomMatch[1];
       const action = roomMatch[2] || '';
 
-      // GET /api/rooms/:code
       if (!action && req.method === 'GET') {
         const room = store.rooms.get(code);
-        if (!room) {
-          sendJson(res, 404, { error: '존재하지 않는 방 번호입니다.' });
+        if (!room || room.participants.size === 0) {
+          sendJson(res, 404, { error: '존재하지 않는 방입니다.' });
           return true;
         }
         sendJson(res, 200, { room: store.serializeRoom(room) });
         return true;
       }
 
-      // GET /api/rooms/:code/events (Server-Sent Events real-time stream)
       if (action === 'events' && req.method === 'GET') {
+        const room = store.rooms.get(code);
+        if (!room) {
+          sendJson(res, 404, { error: '존재하지 않는 방입니다.' });
+          return true;
+        }
+
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
@@ -217,10 +214,7 @@ function createApiRouter({ store, broadcastRoom }) {
         }
         sseSubscribers.get(code).add(res);
 
-        const room = store.rooms.get(code);
-        if (room) {
-          res.write(`data: ${JSON.stringify({ type: 'room_state', room: store.serializeRoom(room) })}\n\n`);
-        }
+        res.write(`data: ${JSON.stringify({ type: 'room_state', room: store.serializeRoom(room) })}\n\n`);
 
         const keepAlive = setInterval(() => {
           try {
@@ -239,25 +233,22 @@ function createApiRouter({ store, broadcastRoom }) {
         return true;
       }
 
-      // POST /api/rooms/:code/join
       if (action === 'join' && req.method === 'POST') {
         try {
           const body = await readJsonBody(req);
           const room = store.joinRoom({
             roomCode: code,
             clientId: body.clientId,
-            nickname: body.nickname,
-            presets: body.presets
+            nickname: body.nickname
           });
           notifyRoomUpdated(room);
           sendJson(res, 200, { room: store.serializeRoom(room) });
         } catch (err) {
-          sendJson(res, 400, { error: err.message });
+          sendJson(res, err.statusCode || 400, { error: err.message });
         }
         return true;
       }
 
-      // POST /api/rooms/:code/leave
       if (action === 'leave' && req.method === 'POST') {
         try {
           const body = await readJsonBody(req);
@@ -270,13 +261,12 @@ function createApiRouter({ store, broadcastRoom }) {
         return true;
       }
 
-      // PUT /api/rooms/:code/presets
       if (action === 'presets' && (req.method === 'PUT' || req.method === 'POST')) {
         try {
           const body = await readJsonBody(req);
           const room = store.updateRoomPresets(code, body.presets, body.clientId);
           if (!room) {
-            sendJson(res, 404, { error: '방을 찾을 수 없습니다.' });
+            sendJson(res, 404, { error: '존재하지 않는 방입니다.' });
             return true;
           }
           notifyRoomUpdated(room);
@@ -287,13 +277,12 @@ function createApiRouter({ store, broadcastRoom }) {
         return true;
       }
 
-      // POST /api/rooms/:code/select-preset
       if (action === 'select-preset' && req.method === 'POST') {
         try {
           const body = await readJsonBody(req);
           const room = store.selectRoomPreset(code, body.presetIndex);
           if (!room) {
-            sendJson(res, 404, { error: '방을 찾을 수 없습니다.' });
+            sendJson(res, 404, { error: '존재하지 않는 방입니다.' });
             return true;
           }
           notifyRoomUpdated(room);
@@ -304,30 +293,12 @@ function createApiRouter({ store, broadcastRoom }) {
         return true;
       }
 
-      // POST /api/rooms/:code/playback
       if (action === 'playback' && req.method === 'POST') {
         try {
           const body = await readJsonBody(req);
           const room = store.toggleRoomPlayback(code, body.isPlaying);
           if (!room) {
-            sendJson(res, 404, { error: '방을 찾을 수 없습니다.' });
-            return true;
-          }
-          notifyRoomUpdated(room);
-          sendJson(res, 200, { room: store.serializeRoom(room) });
-        } catch (err) {
-          sendJson(res, 400, { error: err.message });
-        }
-        return true;
-      }
-
-      // POST /api/rooms/:code/simulate-member
-      if (action === 'simulate-member' && req.method === 'POST') {
-        try {
-          const body = await readJsonBody(req);
-          const room = store.addSimulatedMember(code, body.nickname);
-          if (!room) {
-            sendJson(res, 404, { error: '방을 찾을 수 없습니다.' });
+            sendJson(res, 404, { error: '존재하지 않는 방입니다.' });
             return true;
           }
           notifyRoomUpdated(room);
