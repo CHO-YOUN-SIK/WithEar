@@ -119,6 +119,16 @@ function attachWebSocketServer({ server, store, onRoomUpdated }) {
         break;
       }
 
+      case 'rtc_offer':
+      case 'rtc_answer':
+      case 'rtc_ice': {
+        const targetRoom = msg.roomCode || info.roomCode;
+        if (targetRoom) {
+          broadcastRoom(targetRoom, msg);
+        }
+        break;
+      }
+
       case 'create_room': {
         if (info.roomCode) {
           store.leaveRoom(info.roomCode, info.id);

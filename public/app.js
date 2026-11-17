@@ -331,6 +331,9 @@
           if (msg.type === 'room_state') {
             applyRoomStateSnapshot(msg.room);
           }
+          if (msg.type === 'rtc_offer' || msg.type === 'rtc_answer' || msg.type === 'rtc_ice') {
+            handleIncomingRtcSignal(msg);
+          }
         } catch (_) {}
       };
       ws.onclose = () => {
@@ -553,6 +556,16 @@
     };
   }
 
+  function sendRtcSignal(roomCode, signalObj) {
+    if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify(signalObj)); } catch (_) {}
+    }
+    if (broadcastChannel) {
+      try { broadcastChannel.postMessage(signalObj); } catch (_) {}
+    }
+    publishCloudRelayRoom(roomCode, signalObj, false);
+  }
+
   async function initiateRtcToHost(hostId, roomCode) {
     if (!hostId || hostId === state.clientId || rtcPeers.has(hostId)) return;
     try {
@@ -563,25 +576,25 @@
 
       pc.onicecandidate = (ev) => {
         if (ev.candidate) {
-          publishCloudRelayRoom(roomCode, {
+          sendRtcSignal(roomCode, {
             type: 'rtc_ice',
             roomCode,
             fromId: state.clientId,
             toId: hostId,
             candidate: ev.candidate
-          }, false);
+          });
         }
       };
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      publishCloudRelayRoom(roomCode, {
+      sendRtcSignal(roomCode, {
         type: 'rtc_offer',
         roomCode,
         fromId: state.clientId,
         toId: hostId,
         sdp: pc.localDescription
-      }, false);
+      });
     } catch (_) {}
   }
 
@@ -602,26 +615,26 @@
 
         pc.onicecandidate = (ev) => {
           if (ev.candidate) {
-            publishCloudRelayRoom(msg.roomCode, {
+            sendRtcSignal(msg.roomCode, {
               type: 'rtc_ice',
               roomCode: msg.roomCode,
               fromId: state.clientId,
               toId: msg.fromId,
               candidate: ev.candidate
-            }, false);
+            });
           }
         };
 
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        publishCloudRelayRoom(msg.roomCode, {
+        sendRtcSignal(msg.roomCode, {
           type: 'rtc_answer',
           roomCode: msg.roomCode,
           fromId: state.clientId,
           toId: msg.fromId,
           sdp: pc.localDescription
-        }, false);
+        });
       } else if (msg.type === 'rtc_answer') {
         const entry = rtcPeers.get(msg.fromId);
         if (entry && entry.pc) {
@@ -1310,6 +1323,14 @@
             applyRoomStateSnapshot(data.room);
             subscribeRoomSse(data.room.code);
             subscribeCloudRelayRoom(data.room.code);
+            if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'join_room',
+                clientId: state.clientId,
+                roomCode: data.room.code,
+                nickname
+              }));
+            }
             publishCloudRelayRoom(data.room.code, { type: 'room_state', room: data.room }, true);
             closeRoomModal();
             switchScreen('room');
