@@ -3,6 +3,7 @@
 
   const STORAGE_KEY_PRESETS = 'withear_presets_v1';
   const STORAGE_KEY_NICKNAME = 'withear_nickname_v1';
+  const STORAGE_KEY_CLIENT_ID = 'withear_client_id_v1';
   const STORAGE_KEY_ROOMS = 'withear_shared_rooms_v1';
 
   const STICKER_COLORS = ['#FFE156', '#FF7EB6', '#6EE7B7', '#70D6FF', '#FF9F5A', '#E9FFB8'];
@@ -87,10 +88,23 @@
     }
   ];
 
+  function getOrCreateClientId() {
+    try {
+      let id = localStorage.getItem(STORAGE_KEY_CLIENT_ID);
+      if (!id) {
+        id = 'usr_' + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem(STORAGE_KEY_CLIENT_ID, id);
+      }
+      return id;
+    } catch (_) {
+      return 'usr_' + Math.random().toString(36).slice(2, 10);
+    }
+  }
+
   const state = {
     currentScreen: 'home',
     modalMode: 'create',
-    clientId: 'local_' + Math.random().toString(36).slice(2, 9),
+    clientId: getOrCreateClientId(),
     nickname: localStorage.getItem(STORAGE_KEY_NICKNAME) || '',
     presets: loadPresets(),
     editingSlotIndex: 0,
@@ -104,6 +118,9 @@
     selectedPresetIndex: 0,
     isPlaying: false,
     playStartTimeMs: null,
+    playbackSeq: 0,
+    serverClockOffsetMs: 0,
+    backendAvailable: false,
     clickSound: 'studio'
   };
 
@@ -138,6 +155,11 @@
     try {
       localStorage.setItem(STORAGE_KEY_PRESETS, JSON.stringify(state.presets));
     } catch (_) {}
+    if (state.backendAvailable) {
+      apiRequest(`/api/presets/${encodeURIComponent(state.clientId)}`, 'PUT', {
+        presets: state.presets
+      }).catch(() => {});
+    }
   }
 
   function clampBpm(val) {
@@ -146,7 +168,126 @@
   }
 
   // ==========================================
-  // WEB AUDIO METRONOME ENGINE
+  // BACKEND REST API + SSE + WEBSOCKET CLIENT
+  // ==========================================
+  let ws = null;
+  let wsConnected = false;
+  let sseSource = null;
+  let broadcastChannel = null;
+
+  if ('BroadcastChannel' in window) {
+    broadcastChannel = new BroadcastChannel('withear_sync_v1');
+    broadcastChannel.onmessage = (ev) => {
+      if (ev.data && ev.data.type === 'room_state' && ev.data.room && ev.data.room.code === state.roomCode) {
+        applyRoomStateSnapshot(ev.data.room);
+      }
+    };
+  }
+
+  window.addEventListener('storage', (ev) => {
+    if (ev.key === STORAGE_KEY_ROOMS && state.roomCode) {
+      const all = getLocalRoomsMap();
+      if (all[state.roomCode]) applyRoomStateSnapshot(all[state.roomCode]);
+    }
+  });
+
+  async function apiRequest(path, method = 'GET', body = null) {
+    const opts = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Id': state.clientId
+      }
+    };
+    if (body !== null) {
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(path, opts);
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async function syncServerClock() {
+    try {
+      const t0 = Date.now();
+      const data = await apiRequest(`/api/clock?clientSentAt=${t0}`, 'GET');
+      const t3 = Date.now();
+      const rtt = t3 - t0;
+      const estimatedServerTime = data.serverSentAt + rtt / 2;
+      state.serverClockOffsetMs = estimatedServerTime - t3;
+      state.backendAvailable = true;
+      updateSyncTag(true, 'SERVER SYNC');
+    } catch (_) {
+      state.backendAvailable = false;
+    }
+  }
+
+  function updateSyncTag(online, labelText) {
+    const dot = document.getElementById('sync-status-dot');
+    const txt = document.getElementById('sync-status-text');
+    if (dot) dot.style.background = online ? '#6EE7B7' : '#FFE156';
+    if (txt) txt.textContent = labelText;
+  }
+
+  function subscribeRoomSse(roomCode) {
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
+    }
+    if (!state.backendAvailable || !('EventSource' in window)) return;
+    try {
+      sseSource = new EventSource(`/api/rooms/${encodeURIComponent(roomCode)}/events`);
+      sseSource.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed && parsed.type === 'room_state' && parsed.room) {
+            applyRoomStateSnapshot(parsed.room);
+          }
+        } catch (_) {}
+      };
+    } catch (_) {}
+  }
+
+  function connectWebSocket() {
+    if (window.location.protocol === 'file:') return;
+    syncServerClock();
+
+    try {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+      ws.onopen = () => {
+        wsConnected = true;
+        state.backendAvailable = true;
+        updateSyncTag(true, 'LIVE SYNC');
+        ws.send(JSON.stringify({ type: 'ping_clock', clientSentAt: Date.now() }));
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'pong_clock') {
+            const now = Date.now();
+            const rtt = now - msg.clientSentAt;
+            state.serverClockOffsetMs = (msg.serverTime + rtt / 2) - now;
+          }
+          if (msg.type === 'room_joined' || msg.type === 'room_state') {
+            applyRoomStateSnapshot(msg.room);
+          }
+        } catch (_) {}
+      };
+      ws.onclose = () => {
+        wsConnected = false;
+      };
+      ws.onerror = () => {
+        wsConnected = false;
+      };
+    } catch (_) {}
+  }
+
+  // ==========================================
+  // WEB AUDIO METRONOME ENGINE (CLOCK-SYNCED)
   // ==========================================
   let audioCtx = null;
   let schedulerTimerId = null;
@@ -269,11 +410,18 @@
     };
   }
 
-  function startMetronomeEngine(activePreset) {
+  function startMetronomeEngine(activePreset, scheduledServerStartTime = null) {
     stopMetronomeEngine(false);
     const ctx = ensureAudioContext();
     sequenceStepIndex = 0;
-    nextNoteAudioTime = ctx.currentTime + 0.04;
+
+    if (scheduledServerStartTime) {
+      const estimatedServerNow = Date.now() + state.serverClockOffsetMs;
+      const deltaSec = (scheduledServerStartTime - estimatedServerNow) / 1000;
+      nextNoteAudioTime = ctx.currentTime + Math.max(0.02, Math.min(0.5, deltaSec));
+    } else {
+      nextNoteAudioTime = ctx.currentTime + 0.04;
+    }
 
     schedulerTimerId = window.setInterval(() => {
       if (!state.isPlaying && !state.isPreviewPlaying) return;
@@ -310,50 +458,6 @@
     if (resetUI) resetRoomBeatLEDs();
   }
 
-  // ==========================================
-  // REAL-TIME ROOM SYNC
-  // ==========================================
-  let ws = null;
-  let wsConnected = false;
-  let broadcastChannel = null;
-
-  if ('BroadcastChannel' in window) {
-    broadcastChannel = new BroadcastChannel('withear_sync_v1');
-    broadcastChannel.onmessage = (ev) => {
-      if (ev.data && ev.data.type === 'room_state' && ev.data.room && ev.data.room.code === state.roomCode) {
-        applyRoomStateSnapshot(ev.data.room);
-      }
-    };
-  }
-
-  window.addEventListener('storage', (ev) => {
-    if (ev.key === STORAGE_KEY_ROOMS && state.roomCode) {
-      const all = getLocalRoomsMap();
-      if (all[state.roomCode]) applyRoomStateSnapshot(all[state.roomCode]);
-    }
-  });
-
-  function connectWebSocket() {
-    if (window.location.protocol === 'file:') return;
-    try {
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${proto}//${window.location.host}/ws`);
-      ws.onopen = () => { wsConnected = true; };
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'welcome') state.clientId = msg.clientId;
-          if (msg.type === 'room_joined' || msg.type === 'room_state') {
-            if (msg.clientId) state.clientId = msg.clientId;
-            applyRoomStateSnapshot(msg.room);
-          }
-        } catch (_) {}
-      };
-      ws.onclose = () => { wsConnected = false; };
-      ws.onerror = () => { wsConnected = false; };
-    } catch (_) {}
-  }
-
   function getLocalRoomsMap() {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_KEY_ROOMS) || '{}');
@@ -377,7 +481,7 @@
     if (!room) return;
     const wasPlaying = state.isPlaying;
     const prevPresetIdx = state.selectedPresetIndex;
-    const prevStartTime = state.playStartTimeMs;
+    const prevSeq = state.playbackSeq;
 
     state.roomCode = room.code;
     state.isHost = room.hostId === state.clientId;
@@ -393,13 +497,14 @@
     const playback = room.playback || { isPlaying: false };
     state.isPlaying = Boolean(playback.isPlaying);
     state.playStartTimeMs = playback.startServerTime || null;
+    state.playbackSeq = playback.seq || 0;
 
     renderRoomScreen();
 
     if (state.isPlaying) {
-      if (!wasPlaying || prevPresetIdx !== state.selectedPresetIndex || prevStartTime !== state.playStartTimeMs) {
+      if (!wasPlaying || prevPresetIdx !== state.selectedPresetIndex || prevSeq !== state.playbackSeq) {
         const preset = state.presets[state.selectedPresetIndex] || state.presets[0];
-        startMetronomeEngine(preset);
+        startMetronomeEngine(preset, state.playStartTimeMs);
       }
     } else if (wasPlaying) {
       stopMetronomeEngine(true);
@@ -456,7 +561,7 @@
     document.getElementById('room-modal-backdrop').classList.remove('open');
   }
 
-  function handleRoomEntrySubmit(e) {
+  async function handleRoomEntrySubmit(e) {
     e.preventDefault();
     ensureAudioContext();
 
@@ -478,10 +583,30 @@
     if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: state.modalMode === 'create' ? 'create_room' : 'join_room',
+        clientId: state.clientId,
         roomCode: rawCode,
         nickname,
         presets: state.presets
       }));
+      subscribeRoomSse(rawCode);
+    } else if (state.backendAvailable) {
+      try {
+        const endpoint = state.modalMode === 'create'
+          ? '/api/rooms'
+          : `/api/rooms/${encodeURIComponent(rawCode)}/join`;
+        const data = await apiRequest(endpoint, 'POST', {
+          roomCode: rawCode,
+          clientId: state.clientId,
+          nickname,
+          presets: state.presets
+        });
+        if (data.room) {
+          applyRoomStateSnapshot(data.room);
+          subscribeRoomSse(data.room.code);
+        }
+      } catch (err) {
+        showToast(err.message);
+      }
     } else {
       const allRooms = getLocalRoomsMap();
       let room = allRooms[rawCode];
@@ -492,7 +617,7 @@
           participants: [{ id: state.clientId, nickname, isHost: true }],
           presets: state.presets,
           selectedPresetIndex: 0,
-          playback: { isPlaying: false, startServerTime: null, presetIndex: 0 }
+          playback: { isPlaying: false, startServerTime: null, presetIndex: 0, seq: 1 }
         };
       } else {
         if (!room.participants.some((p) => p.id === state.clientId)) {
@@ -517,7 +642,6 @@
     const preset = getActiveEditingPreset();
     if (!preset) return;
 
-    // 1~6 Slot buttons
     const tabsEl = document.getElementById('preset-slot-tabs');
     tabsEl.innerHTML = '';
     state.presets.forEach((p, idx) => {
@@ -824,29 +948,48 @@
     }, 90);
   }
 
-  function selectRoomPreset(index) {
+  async function selectRoomPreset(index) {
     ensureAudioContext();
     state.selectedPresetIndex = index;
+
     if (wsConnected && ws && ws.readyState === WebSocket.OPEN && state.roomCode) {
       ws.send(JSON.stringify({ type: 'select_preset', presetIndex: index }));
+    } else if (state.backendAvailable && state.roomCode) {
+      try {
+        const res = await apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/select-preset`, 'POST', {
+          presetIndex: index
+        });
+        if (res.room) applyRoomStateSnapshot(res.room);
+      } catch (_) {}
     } else if (state.roomCode) {
       const all = getLocalRoomsMap();
       const room = all[state.roomCode];
       if (room) {
         room.selectedPresetIndex = index;
         room.playback.presetIndex = index;
-        if (room.playback.isPlaying) room.playback.startServerTime = Date.now();
+        if (room.playback.isPlaying) {
+          room.playback.startServerTime = Date.now();
+          room.playback.seq = (room.playback.seq || 0) + 1;
+        }
         saveLocalRoomSnapshot(room);
         applyRoomStateSnapshot(room);
       } else renderRoomScreen();
     } else renderRoomScreen();
   }
 
-  function triggerRoomPlayState(nextPlayBool) {
+  async function triggerRoomPlayState(nextPlayBool) {
     ensureAudioContext();
     const targetPlay = typeof nextPlayBool === 'boolean' ? nextPlayBool : !state.isPlaying;
+
     if (wsConnected && ws && ws.readyState === WebSocket.OPEN && state.roomCode) {
       ws.send(JSON.stringify({ type: 'toggle_play', isPlaying: targetPlay }));
+    } else if (state.backendAvailable && state.roomCode) {
+      try {
+        const res = await apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/playback`, 'POST', {
+          isPlaying: targetPlay
+        });
+        if (res.room) applyRoomStateSnapshot(res.room);
+      } catch (_) {}
     } else {
       const all = getLocalRoomsMap();
       const room = state.roomCode ? all[state.roomCode] : null;
@@ -854,7 +997,8 @@
         room.playback = {
           isPlaying: targetPlay,
           startServerTime: targetPlay ? Date.now() : null,
-          presetIndex: state.selectedPresetIndex
+          presetIndex: state.selectedPresetIndex,
+          seq: (room.playback?.seq || 0) + 1
         };
         saveLocalRoomSnapshot(room);
         applyRoomStateSnapshot(room);
@@ -867,7 +1011,7 @@
     }
   }
 
-  function addSimulatedBandMember() {
+  async function addSimulatedBandMember() {
     const sampleNames = ['드럼 지훈', '베이스 현우', '기타 준영', '건반 수빈', '보컬 하은'];
     const existingNames = new Set(state.participants.map((p) => p.nickname));
     const available = sampleNames.filter((n) => !existingNames.has(n));
@@ -875,6 +1019,13 @@
 
     if (wsConnected && ws && ws.readyState === WebSocket.OPEN && state.roomCode) {
       ws.send(JSON.stringify({ type: 'add_simulated_member', nickname: chosen }));
+    } else if (state.backendAvailable && state.roomCode) {
+      try {
+        const res = await apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/simulate-member`, 'POST', {
+          nickname: chosen
+        });
+        if (res.room) applyRoomStateSnapshot(res.room);
+      } catch (_) {}
     } else if (state.roomCode) {
       const all = getLocalRoomsMap();
       const room = all[state.roomCode];
@@ -907,10 +1058,17 @@
     document.getElementById('btn-close-modal').addEventListener('click', closeRoomModal);
     document.getElementById('form-room-entry').addEventListener('submit', handleRoomEntrySubmit);
 
-    document.getElementById('btn-preset-back-home').addEventListener('click', () => {
+    document.getElementById('btn-preset-back-home').addEventListener('click', async () => {
       savePresetsToStorage();
       if (wsConnected && ws && ws.readyState === WebSocket.OPEN && state.roomCode) {
         ws.send(JSON.stringify({ type: 'update_presets', presets: state.presets }));
+      } else if (state.backendAvailable && state.roomCode) {
+        try {
+          await apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/presets`, 'PUT', {
+            clientId: state.clientId,
+            presets: state.presets
+          });
+        } catch (_) {}
       }
       showToast('저장 완료!');
       switchScreen(state.roomCode ? 'room' : 'home');
@@ -1009,10 +1167,18 @@
       switchScreen('presets');
     });
 
-    document.getElementById('btn-leave-room').addEventListener('click', () => {
+    document.getElementById('btn-leave-room').addEventListener('click', async () => {
       if (state.isPlaying) triggerRoomPlayState(false);
+      if (sseSource) {
+        sseSource.close();
+        sseSource = null;
+      }
       if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'leave_room' }));
+      } else if (state.backendAvailable && state.roomCode) {
+        apiRequest(`/api/rooms/${encodeURIComponent(state.roomCode)}/leave`, 'POST', {
+          clientId: state.clientId
+        }).catch(() => {});
       }
       state.roomCode = null;
       state.participants = [];
