@@ -123,25 +123,34 @@
     // Clock synchronization state (best min-RTT NTP sample relative to server/host)
     serverClockOffsetMs: 0,
     bestClockRttMs: Infinity,
+    userLatencyOffsetMs: parseInt(localStorage.getItem('withear_latency_ms') || '0', 10) || 0,
     backendAvailable: false,
     cloudRelayConnected: false,
     clickSound: 'studio'
   };
 
+  // Monotonic wall-clock epoch so OS NTP jumps don't cause sudden beat skips
+  const MONOTONIC_EPOCH_MS = Date.now() - performance.now();
+
+  function getMonotonicWallNowMs() {
+    return MONOTONIC_EPOCH_MS + performance.now();
+  }
+
   function getSynchronizedNowMs() {
-    return Date.now() + state.serverClockOffsetMs;
+    return getMonotonicWallNowMs() + state.serverClockOffsetMs;
   }
 
   function recordClockSample(clientSentAt, remoteTime, clientReceivedAt) {
     const rtt = clientReceivedAt - clientSentAt;
-    if (rtt < 0 || rtt > 5000) return;
+    if (rtt < 0 || rtt > 3000) return;
     const estimatedRemoteNow = remoteTime + rtt / 2;
     const offset = estimatedRemoteNow - clientReceivedAt;
     if (rtt <= state.bestClockRttMs) {
       state.bestClockRttMs = rtt;
       state.serverClockOffsetMs = offset;
-    } else {
-      state.serverClockOffsetMs = state.serverClockOffsetMs * 0.8 + offset * 0.2;
+    } else if (rtt < state.bestClockRttMs * 1.5) {
+      // Gently track oscillator drift only from low-jitter samples
+      state.serverClockOffsetMs = state.serverClockOffsetMs * 0.85 + offset * 0.15;
     }
   }
 
@@ -597,37 +606,73 @@
     }
   }
 
+  let peerClockIntervalId = null;
+
   function startPeerClockSyncWithHost(roomCode) {
+    if (peerClockIntervalId) {
+      clearInterval(peerClockIntervalId);
+      peerClockIntervalId = null;
+    }
     if (state.isHost) {
       state.serverClockOffsetMs = 0;
       state.bestClockRttMs = 0;
       return;
     }
+    const sendPing = () => {
+      if (state.roomCode === roomCode) {
+        broadcastToAllPeers(roomCode, {
+          type: 'peer_clock_ping',
+          roomCode,
+          clientId: state.clientId,
+          clientSentAt: getMonotonicWallNowMs()
+        }, false);
+      }
+    };
     for (let i = 0; i < 5; i++) {
-      setTimeout(() => {
-        if (state.roomCode === roomCode) {
-          broadcastToAllPeers(roomCode, {
-            type: 'peer_clock_ping',
-            roomCode,
-            clientId: state.clientId,
-            clientSentAt: Date.now()
-          }, false);
-        }
-      }, i * 140);
+      setTimeout(sendPing, i * 140);
     }
+    // Continuous background drift re-calibration every 3s
+    peerClockIntervalId = setInterval(() => {
+      if (state.roomCode === roomCode) sendPing();
+      else {
+        clearInterval(peerClockIntervalId);
+        peerClockIntervalId = null;
+      }
+    }, 3000);
   }
 
   // ==========================================
-  // PHASE-LOCKED WEB AUDIO METRONOME ENGINE
+  // PHASE-LOCKED WEB AUDIO METRONOME ENGINE (WITH HARDWARE PLL + WAKE LOCK)
   // ==========================================
   let audioCtx = null;
   let schedulerTimerId = null;
   let scheduledStepIndex = 0;
+  let wakeLockSentinel = null;
+
+  async function acquireWakeLock() {
+    try {
+      if ('wakeLock' in navigator && !wakeLockSentinel) {
+        wakeLockSentinel = await navigator.wakeLock.request('screen');
+        wakeLockSentinel.addEventListener('release', () => {
+          wakeLockSentinel = null;
+        });
+      }
+    } catch (_) {}
+  }
+
+  function releaseWakeLock() {
+    try {
+      if (wakeLockSentinel) {
+        wakeLockSentinel.release();
+        wakeLockSentinel = null;
+      }
+    } catch (_) {}
+  }
 
   function ensureAudioContext() {
     if (!audioCtx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      audioCtx = new AudioContextClass();
+      audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
     }
     if (audioCtx.state === 'suspended') {
       audioCtx.resume();
@@ -800,26 +845,39 @@
   function startMetronomeEngine(activePreset, scheduledServerStartTime = null) {
     stopMetronomeEngine(false);
     const ctx = ensureAudioContext();
+    acquireWakeLock();
 
     const syncNow = getSynchronizedNowMs();
     const anchorStartMs = scheduledServerStartTime || (syncNow + 40);
 
+    // Hardware output latency + per-device user calibration offset
+    const hwOutputLatencySec = Number(ctx.outputLatency || ctx.baseLatency || 0);
+    const getTotalOffsetSec = () => (state.userLatencyOffsetMs / 1000) - hwOutputLatencySec;
+
+    // Lock hardware audio clock (ctx.currentTime) to global server start time (PLL anchor)
+    let audioAnchorTimeSec = ctx.currentTime + ((anchorStartMs - syncNow) / 1000) + getTotalOffsetSec();
     scheduledStepIndex = findInitialBeatIndex(activePreset, anchorStartMs, syncNow);
 
-    const lookaheadHorizonMs = 110;
+    const lookaheadHorizonSec = 0.12;
 
     schedulerTimerId = window.setInterval(() => {
       if (!state.isPlaying && !state.isPreviewPlaying) return;
 
-      const currentSyncMs = getSynchronizedNowMs();
-      const currentAudioTime = ctx.currentTime;
+      // Gentle Phase-Locked Loop (PLL): compare hardware audio clock vs synchronized server clock
+      const nowSyncMs = getSynchronizedNowMs();
+      const expectedAudioAnchorSec = ctx.currentTime + ((anchorStartMs - nowSyncMs) / 1000) + getTotalOffsetSec();
+      const driftSec = expectedAudioAnchorSec - audioAnchorTimeSec;
+      if (Math.abs(driftSec) > 0.006) {
+        // Nudge smoothly (25%) so audio never glitches, or snap if > 60ms
+        audioAnchorTimeSec += Math.abs(driftSec) > 0.06 ? driftSec : driftSec * 0.25;
+      }
 
       while (true) {
-        const beatOffsetMs = getCumulativeBeatOffsetMs(activePreset, scheduledStepIndex);
-        const beatTargetServerMs = anchorStartMs + beatOffsetMs;
-        const msUntilBeat = beatTargetServerMs - currentSyncMs;
+        const beatOffsetSec = getCumulativeBeatOffsetMs(activePreset, scheduledStepIndex) / 1000;
+        const noteAudioTime = audioAnchorTimeSec + beatOffsetSec;
+        const secUntilBeat = noteAudioTime - ctx.currentTime;
 
-        if (msUntilBeat > lookaheadHorizonMs) {
+        if (secUntilBeat > lookaheadHorizonSec) {
           break;
         }
 
@@ -830,15 +888,15 @@
           return;
         }
 
-        const noteAudioTime = currentAudioTime + Math.max(0, msUntilBeat / 1000);
-        playClickSound(noteAudioTime, meta.beatInBar === 0, state.clickSound);
-
-        const visualDelayMs = Math.max(0, msUntilBeat);
-        const capturedMeta = { ...meta };
-        window.setTimeout(() => {
-          if (!state.isPlaying && !state.isPreviewPlaying) return;
-          updateVisualBeatUI(capturedMeta);
-        }, visualDelayMs);
+        if (secUntilBeat >= -0.02) {
+          playClickSound(noteAudioTime, meta.beatInBar === 0, state.clickSound);
+          const visualDelayMs = Math.max(0, secUntilBeat * 1000);
+          const capturedMeta = { ...meta };
+          window.setTimeout(() => {
+            if (!state.isPlaying && !state.isPreviewPlaying) return;
+            updateVisualBeatUI(capturedMeta);
+          }, visualDelayMs);
+        }
 
         scheduledStepIndex++;
       }
@@ -850,6 +908,7 @@
       clearInterval(schedulerTimerId);
       schedulerTimerId = null;
     }
+    releaseWakeLock();
     document.body.classList.remove('beat-flash-downbeat', 'beat-flash-normal');
     if (resetUI) resetRoomBeatLEDs();
   }
@@ -1750,6 +1809,22 @@
     });
 
     document.getElementById('btn-room-play-toggle').addEventListener('click', () => triggerRoomPlayState(!state.isPlaying));
+
+    const updateLatencyDisplay = () => {
+      const el = document.getElementById('latency-offset-display');
+      if (el) el.textContent = `${state.userLatencyOffsetMs > 0 ? '+' : ''}${state.userLatencyOffsetMs}ms`;
+      try { localStorage.setItem('withear_latency_ms', String(state.userLatencyOffsetMs)); } catch (_) {}
+    };
+    updateLatencyDisplay();
+
+    document.getElementById('btn-latency-minus').addEventListener('click', () => {
+      state.userLatencyOffsetMs = Math.max(-250, state.userLatencyOffsetMs - 5);
+      updateLatencyDisplay();
+    });
+    document.getElementById('btn-latency-plus').addEventListener('click', () => {
+      state.userLatencyOffsetMs = Math.min(250, state.userLatencyOffsetMs + 5);
+      updateLatencyDisplay();
+    });
   }
 
   initEventListeners();
