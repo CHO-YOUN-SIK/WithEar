@@ -123,7 +123,6 @@
     // Clock synchronization state (best min-RTT NTP sample relative to server/host)
     serverClockOffsetMs: 0,
     bestClockRttMs: Infinity,
-    userLatencyOffsetMs: parseInt(localStorage.getItem('withear_latency_ms') || '0', 10) || 0,
     backendAvailable: false,
     cloudRelayConnected: false,
     clickSound: 'studio'
@@ -483,10 +482,173 @@
     mqttSocket.send(buildMqttPublishPacket(`withear/v2/room/${roomCode}`, payloadObj, retain));
   }
 
+  // ==========================================
+  // TIER 3: DIRECT LOCAL P2P (WEBRTC DATACHANNEL OVER LAN/WIFI)
+  // Bypasses internet broker latency completely for 1~4ms local sync!
+  // ==========================================
+  const rtcPeers = new Map(); // peerId -> { pc, dc, isOpen }
+  const RTC_CONFIG = {
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  };
+
+  function closeAllRtcPeers() {
+    for (const entry of rtcPeers.values()) {
+      try { if (entry.dc) entry.dc.close(); } catch (_) {}
+      try { if (entry.pc) entry.pc.close(); } catch (_) {}
+    }
+    rtcPeers.clear();
+  }
+
+  function setupDataChannelHandlers(peerId, dc) {
+    const entry = rtcPeers.get(peerId) || {};
+    entry.dc = dc;
+    rtcPeers.set(peerId, entry);
+
+    dc.onopen = () => {
+      entry.isOpen = true;
+      updateSyncTag(true, 'P2P LOCAL SYNC');
+      // Run 12 rapid local P2P clock pings (35ms apart) for <2ms local LAN lock
+      if (!state.isHost) {
+        state.bestClockRttMs = Infinity;
+        for (let i = 0; i < 12; i++) {
+          setTimeout(() => {
+            if (dc.readyState === 'open') {
+              dc.send(JSON.stringify({
+                type: 'rtc_ping',
+                clientId: state.clientId,
+                clientSentAt: getMonotonicWallNowMs()
+              }));
+            }
+          }, i * 35);
+        }
+      }
+    };
+
+    dc.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'rtc_ping' && state.isHost) {
+          if (dc.readyState === 'open') {
+            dc.send(JSON.stringify({
+              type: 'rtc_pong',
+              clientSentAt: msg.clientSentAt,
+              hostTime: getMonotonicWallNowMs()
+            }));
+          }
+          return;
+        }
+        if (msg.type === 'rtc_pong') {
+          recordClockSample(msg.clientSentAt, msg.hostTime, getMonotonicWallNowMs());
+          return;
+        }
+        if (msg.type === 'room_state' && msg.room && msg.room.code === state.roomCode) {
+          saveLocalRoomSnapshot(msg.room);
+          applyRoomStateSnapshot(msg.room);
+        }
+      } catch (_) {}
+    };
+
+    dc.onclose = () => {
+      entry.isOpen = false;
+    };
+  }
+
+  async function initiateRtcToHost(hostId, roomCode) {
+    if (!hostId || hostId === state.clientId || rtcPeers.has(hostId)) return;
+    try {
+      const pc = new RTCPeerConnection(RTC_CONFIG);
+      const dc = pc.createDataChannel('withear-sync', { ordered: false, maxRetransmits: 0 });
+      rtcPeers.set(hostId, { pc, dc, isOpen: false });
+      setupDataChannelHandlers(hostId, dc);
+
+      pc.onicecandidate = (ev) => {
+        if (ev.candidate) {
+          publishCloudRelayRoom(roomCode, {
+            type: 'rtc_ice',
+            roomCode,
+            fromId: state.clientId,
+            toId: hostId,
+            candidate: ev.candidate
+          }, false);
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      publishCloudRelayRoom(roomCode, {
+        type: 'rtc_offer',
+        roomCode,
+        fromId: state.clientId,
+        toId: hostId,
+        sdp: pc.localDescription
+      }, false);
+    } catch (_) {}
+  }
+
+  async function handleIncomingRtcSignal(msg) {
+    if (!msg || msg.toId !== state.clientId || msg.roomCode !== state.roomCode) return;
+    try {
+      if (msg.type === 'rtc_offer') {
+        const existing = rtcPeers.get(msg.fromId);
+        if (existing) {
+          try { existing.pc.close(); } catch (_) {}
+        }
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        rtcPeers.set(msg.fromId, { pc, dc: null, isOpen: false });
+
+        pc.ondatachannel = (ev) => {
+          setupDataChannelHandlers(msg.fromId, ev.channel);
+        };
+
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate) {
+            publishCloudRelayRoom(msg.roomCode, {
+              type: 'rtc_ice',
+              roomCode: msg.roomCode,
+              fromId: state.clientId,
+              toId: msg.fromId,
+              candidate: ev.candidate
+            }, false);
+          }
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        publishCloudRelayRoom(msg.roomCode, {
+          type: 'rtc_answer',
+          roomCode: msg.roomCode,
+          fromId: state.clientId,
+          toId: msg.fromId,
+          sdp: pc.localDescription
+        }, false);
+      } else if (msg.type === 'rtc_answer') {
+        const entry = rtcPeers.get(msg.fromId);
+        if (entry && entry.pc) {
+          await entry.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        }
+      } else if (msg.type === 'rtc_ice') {
+        const entry = rtcPeers.get(msg.fromId);
+        if (entry && entry.pc && msg.candidate) {
+          await entry.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        }
+      }
+    } catch (_) {}
+  }
+
   function broadcastToAllPeers(roomCode, payloadObj, retain = false) {
+    // 1. Send immediately over direct local WebRTC P2P DataChannels (1~4ms LAN)
+    const serialized = JSON.stringify(payloadObj);
+    for (const entry of rtcPeers.values()) {
+      if (entry.dc && entry.dc.readyState === 'open') {
+        try { entry.dc.send(serialized); } catch (_) {}
+      }
+    }
+    // 2. Same-browser multi-tab sync
     if (broadcastChannel) {
       broadcastChannel.postMessage(payloadObj);
     }
+    // 3. Cloud MQTT relay backup
     publishCloudRelayRoom(roomCode, payloadObj, retain);
   }
 
@@ -497,6 +659,12 @@
 
   function handleCloudRelayMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
+
+    // 0. WebRTC P2P signaling
+    if (msg.type === 'rtc_offer' || msg.type === 'rtc_answer' || msg.type === 'rtc_ice') {
+      handleIncomingRtcSignal(msg);
+      return;
+    }
 
     // 1. Handle NTP clock ping/pong between Room Host and Members
     if (msg.type === 'peer_clock_ping' && state.roomCode && msg.roomCode === state.roomCode && state.isHost) {
@@ -619,14 +787,25 @@
       return;
     }
     const sendPing = () => {
-      if (state.roomCode === roomCode) {
-        broadcastToAllPeers(roomCode, {
-          type: 'peer_clock_ping',
-          roomCode,
-          clientId: state.clientId,
-          clientSentAt: getMonotonicWallNowMs()
-        }, false);
+      if (state.roomCode !== roomCode) return;
+      for (const entry of rtcPeers.values()) {
+        if (entry.dc && entry.dc.readyState === 'open') {
+          try {
+            entry.dc.send(JSON.stringify({
+              type: 'rtc_ping',
+              clientId: state.clientId,
+              clientSentAt: getMonotonicWallNowMs()
+            }));
+            return;
+          } catch (_) {}
+        }
       }
+      broadcastToAllPeers(roomCode, {
+        type: 'peer_clock_ping',
+        roomCode,
+        clientId: state.clientId,
+        clientSentAt: getMonotonicWallNowMs()
+      }, false);
     };
     for (let i = 0; i < 5; i++) {
       setTimeout(sendPing, i * 140);
@@ -669,6 +848,8 @@
     } catch (_) {}
   }
 
+  let audioWarmupStarted = false;
+
   function ensureAudioContext() {
     if (!audioCtx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -676,6 +857,18 @@
     }
     if (audioCtx.state === 'suspended') {
       audioCtx.resume();
+    }
+    if (!audioWarmupStarted) {
+      audioWarmupStarted = true;
+      try {
+        const silentOsc = audioCtx.createOscillator();
+        const silentGain = audioCtx.createGain();
+        silentOsc.frequency.value = 1;
+        silentGain.gain.value = 0.00001;
+        silentOsc.connect(silentGain);
+        silentGain.connect(audioCtx.destination);
+        silentOsc.start();
+      } catch (_) {}
     }
     return audioCtx;
   }
@@ -850,9 +1043,9 @@
     const syncNow = getSynchronizedNowMs();
     const anchorStartMs = scheduledServerStartTime || (syncNow + 40);
 
-    // Hardware output latency + per-device user calibration offset
+    // Hardware output latency compensation
     const hwOutputLatencySec = Number(ctx.outputLatency || ctx.baseLatency || 0);
-    const getTotalOffsetSec = () => (state.userLatencyOffsetMs / 1000) - hwOutputLatencySec;
+    const getTotalOffsetSec = () => -hwOutputLatencySec;
 
     // Lock hardware audio clock (ctx.currentTime) to global server start time (PLL anchor)
     let audioAnchorTimeSec = ctx.currentTime + ((anchorStartMs - syncNow) / 1000) + getTotalOffsetSec();
@@ -940,6 +1133,10 @@
     state.roomCode = room.code;
     state.isHost = room.hostId === state.clientId;
     state.participants = Array.isArray(room.participants) ? room.participants : [];
+
+    if (!state.isHost && room.hostId && room.hostId !== state.clientId) {
+      initiateRtcToHost(room.hostId, room.code);
+    }
 
     if (Array.isArray(room.presets) && room.presets.length === 6) {
       state.presets = room.presets;
@@ -1652,6 +1849,7 @@
       clientId: state.clientId
     }, false);
 
+    closeAllRtcPeers();
     state.roomCode = null;
     state.participants = [];
   }
@@ -1806,22 +2004,6 @@
     });
 
     document.getElementById('btn-room-play-toggle').addEventListener('click', () => triggerRoomPlayState(!state.isPlaying));
-
-    const updateLatencyDisplay = () => {
-      const el = document.getElementById('latency-offset-display');
-      if (el) el.textContent = `${state.userLatencyOffsetMs > 0 ? '+' : ''}${state.userLatencyOffsetMs}ms`;
-      try { localStorage.setItem('withear_latency_ms', String(state.userLatencyOffsetMs)); } catch (_) {}
-    };
-    updateLatencyDisplay();
-
-    document.getElementById('btn-latency-minus').addEventListener('click', () => {
-      state.userLatencyOffsetMs = Math.max(-250, state.userLatencyOffsetMs - 5);
-      updateLatencyDisplay();
-    });
-    document.getElementById('btn-latency-plus').addEventListener('click', () => {
-      state.userLatencyOffsetMs = Math.min(250, state.userLatencyOffsetMs + 5);
-      updateLatencyDisplay();
-    });
   }
 
   initEventListeners();
