@@ -505,13 +505,13 @@
         roomCode: state.roomCode,
         targetClientId: msg.clientId,
         clientSentAt: msg.clientSentAt,
-        hostTime: Date.now()
+        hostTime: getMonotonicWallNowMs()
       }, false);
       return;
     }
 
     if (msg.type === 'peer_clock_pong' && msg.targetClientId === state.clientId) {
-      recordClockSample(msg.clientSentAt, msg.hostTime, Date.now());
+      recordClockSample(msg.clientSentAt, msg.hostTime, getMonotonicWallNowMs());
       return;
     }
 
@@ -931,9 +931,6 @@
 
   function applyRoomStateSnapshot(room) {
     if (!room) return;
-    if (room.serverTime && !Number.isFinite(state.bestClockRttMs)) {
-      state.serverClockOffsetMs = room.serverTime - Date.now();
-    }
 
     const wasPlaying = state.isPlaying;
     const prevPresetIdx = state.selectedPresetIndex;
@@ -1562,7 +1559,7 @@
         room.playback.presetIndex = index;
         room.updatedAt = Date.now();
         if (room.playback.isPlaying) {
-          room.playback.startServerTime = getSynchronizedNowMs() + 250;
+          room.playback.startServerTime = getSynchronizedNowMs() + 800;
           room.playback.seq = (room.playback.seq || 0) + 1;
         }
         saveLocalRoomSnapshot(room);
@@ -1591,7 +1588,7 @@
       if (room) {
         room.playback = {
           isPlaying: targetPlay,
-          startServerTime: targetPlay ? (getSynchronizedNowMs() + 250) : null,
+          startServerTime: targetPlay ? (getSynchronizedNowMs() + 800) : null,
           presetIndex: state.selectedPresetIndex,
           seq: (room.playback?.seq || 0) + 1
         };

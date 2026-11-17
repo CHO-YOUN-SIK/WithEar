@@ -326,7 +326,7 @@ class BackendStore {
     if (room.playback.isPlaying) {
       room.playback = {
         isPlaying: true,
-        startServerTime: Date.now() + 250,
+        startServerTime: Date.now() + 800,
         presetIndex: idx,
         seq: (room.playback.seq || 0) + 1
       };
@@ -346,7 +346,7 @@ class BackendStore {
     if (nextState) {
       room.playback = {
         isPlaying: true,
-        startServerTime: Date.now() + 250,
+        startServerTime: Date.now() + 800,
         presetIndex: room.selectedPresetIndex,
         seq: (room.playback.seq || 0) + 1
       };
